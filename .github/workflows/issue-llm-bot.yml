@@ -10,117 +10,160 @@ permissions:
 
 jobs:
   reply:
-    if: startsWith(github.event.issue.title, '[TASK]') && github.event.issue.user.type != 'Bot'
+    name: Reply to [TASK] issues
+    if: startsWith(github.event.issue.title, '[TASK]')
     runs-on: ubuntu-latest
 
     steps:
-      - name: Generate reply and post comment (OpenAI -> Gemini)
+      - name: Generate reply (OpenAI -> fallback Gemini) and comment
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GITHUB_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
-          OPENAI_MODEL: gpt-4o-mini
-          GEMINI_MODEL: gemini-1.5-flash
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
+          set -e
+
           python3 - <<'PY'
           import os, json, urllib.request, urllib.error
 
-          repo = os.environ["REPO"]
-          issue_number = os.environ["ISSUE_NUMBER"]
-          title = (os.environ.get("ISSUE_TITLE") or "").strip()
-          body = (os.environ.get("ISSUE_BODY") or "").strip()
-
-          openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
-          gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-          gh_token = os.environ.get("GITHUB_TOKEN", "").strip()
-
-          openai_model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
-          gemini_model = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash").strip()
-
-          prompt = (
-              "あなたはプロジェクト補助AIです。ユーザーはコピペ量を減らしたい。\n"
-              "以下のIssue内容から、日本語のMarkdownで短く返してください。\n"
-              "出力は必ず次の順で：\n"
-              "1) 要旨（1〜2行）\n"
-              "2) 次の1アクション（クリック/入力まで具体）\n"
-              "3) うまくいかない時の分岐（A/Bの2つまで）\n"
-              "4) 注意点（機密情報は貼らない、1〜2行）\n\n"
-              f"--- Issue Title ---\n{title}\n\n"
-              f"--- Issue Body ---\n{body}\n"
-          )
-
-          def http_json(url, headers, payload):
+          def post_json(url, headers, payload, timeout=30):
               data = json.dumps(payload).encode("utf-8")
               req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-              with urllib.request.urlopen(req, timeout=60) as res:
+              with urllib.request.urlopen(req, timeout=timeout) as res:
                   return json.loads(res.read().decode("utf-8"))
 
-          def call_openai():
-              if not openai_key:
-                  raise RuntimeError("OPENAI_API_KEY is empty")
-              url = "https://api.openai.com/v1/chat/completions"
-              headers = {
-                  "Authorization": f"Bearer {openai_key}",
-                  "Content-Type": "application/json",
-              }
-              payload = {
-                  "model": openai_model,
-                  "messages": [
-                      {"role": "system", "content": "短く、実行しやすく。余計な前置きはしない。"},
-                      {"role": "user", "content": prompt},
-                  ],
-                  "temperature": 0.2,
-              }
-              j = http_json(url, headers, payload)
-              return j["choices"][0]["message"]["content"]
+          def safe_str(x):
+              return "" if x is None else str(x)
 
-          def call_gemini():
-              if not gemini_key:
-                  raise RuntimeError("GEMINI_API_KEY is empty")
-              url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={gemini_key}"
-              headers = {"Content-Type": "application/json"}
-              payload = {"contents": [{"parts": [{"text": prompt}]}]}
-              j = http_json(url, headers, payload)
-              return j["candidates"][0]["content"]["parts"][0]["text"]
+          title = safe_str(os.environ.get("ISSUE_TITLE"))
+          body  = safe_str(os.environ.get("ISSUE_BODY"))
+          num   = safe_str(os.environ.get("ISSUE_NUMBER"))
+          repo  = safe_str(os.environ.get("REPO"))  # "owner/repo"
+          gh_token = safe_str(os.environ.get("GH_TOKEN"))
 
-          reply = None
-          provider = None
-          errors = []
+          openai_key = safe_str(os.environ.get("OPENAI_API_KEY")).strip()
+          gemini_key = safe_str(os.environ.get("GEMINI_API_KEY")).strip()
 
-          # Try OpenAI first
-          try:
-              reply = call_openai()
-              provider = "OpenAI"
-          except Exception as e:
-              errors.append(f"OpenAI: {e}")
+          prompt = f"""あなたはプロジェクト補助AIです。
+          ユーザーは「コピペ量」を減らしたいので、回答は短く・実行しやすく。
 
-          # Fallback to Gemini
-          if reply is None:
+          以下の形式で、日本語Markdownで返してください:
+          1) 要旨（1〜2行）
+          2) 次の1アクション（クリック/入力まで具体）
+          3) うまくいかない時の分岐（A/Bで2つまで）
+          4) 注意点（秘密情報は貼らない、など1〜2行）
+
+          --- Issue Title ---
+          {title}
+
+          --- Issue Body ---
+          {body}
+          """
+
+          reply_text = None
+          used = None
+
+          # 1) OpenAI (try Responses API -> fallback Chat Completions)
+          if openai_key:
               try:
-                  reply = call_gemini()
-                  provider = "Gemini"
-              except Exception as e:
-                  errors.append(f"Gemini: {e}")
+                  headers = {
+                      "Authorization": f"Bearer {openai_key}",
+                      "Content-Type": "application/json",
+                  }
+                  # Responses API (preferred)
+                  try:
+                      r = post_json(
+                          "https://api.openai.com/v1/responses",
+                          headers,
+                          {
+                              "model": "gpt-4o-mini",
+                              "input": prompt,
+                              "max_output_tokens": 600
+                          },
+                      )
+                      reply_text = (r.get("output_text") or "").strip()
+                      if not reply_text:
+                          # Try to extract from structured output
+                          out = r.get("output", [])
+                          parts = []
+                          for item in out:
+                              for c in item.get("content", []):
+                                  if c.get("type") == "output_text" and c.get("text"):
+                                      parts.append(c["text"])
+                          reply_text = ("\n".join(parts)).strip() if parts else None
+                      used = "OpenAI(responses)"
+                  except Exception:
+                      # Chat Completions API
+                      r = post_json(
+                          "https://api.openai.com/v1/chat/completions",
+                          headers,
+                          {
+                              "model": "gpt-4o-mini",
+                              "messages": [{"role": "user", "content": prompt}],
+                              "max_tokens": 600,
+                              "temperature": 0.2,
+                          },
+                      )
+                      reply_text = r["choices"][0]["message"]["content"].strip()
+                      used = "OpenAI(chat.completions)"
+              except Exception:
+                  reply_text = None
+                  used = None
 
-          if reply is None:
-              reply = "実行に失敗しました。\n\n" + "\n".join(f"- {x}" for x in errors)
-              provider = "None"
+          # 2) Gemini fallback
+          if (not reply_text) and gemini_key:
+              try:
+                  url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + gemini_key
+                  headers = {"Content-Type": "application/json"}
+                  r = post_json(
+                      url,
+                      headers,
+                      {
+                          "contents": [
+                              {"role": "user", "parts": [{"text": prompt}]}
+                          ]
+                      },
+                  )
+                  cand = (r.get("candidates") or [{}])[0]
+                  content = cand.get("content") or {}
+                  parts = content.get("parts") or []
+                  texts = [p.get("text","") for p in parts if p.get("text")]
+                  reply_text = ("\n".join(texts)).strip() if texts else None
+                  used = "Gemini"
+              except Exception:
+                  reply_text = None
+                  used = None
 
-          comment_body = f"（自動返信 / {provider}）\n\n{reply}"
+          if not reply_text:
+              reply_text = (
+                  "1) 要旨\n"
+                  "自動返信に失敗しました（APIキー未設定 or API呼び出し失敗）。\n\n"
+                  "2) 次の1アクション\n"
+                  "Settings → Secrets and variables → Actions で OPENAI_API_KEY / GEMINI_API_KEY を確認して、もう一度 Issue を Close→Reopen。\n\n"
+                  "3) うまくいかない時の分岐\n"
+                  "A) Actionsの該当Runを開き、失敗したStepのログを貼る（秘密情報は除く）\n"
+                  "B) いったん OPENAI_API_KEY だけにして再テスト\n\n"
+                  "4) 注意点\n"
+                  "APIキー本文は貼らない（Secretsに入れるだけでOK）。"
+              )
+              used = "Fallback message"
 
-          # Post a comment to the issue
-          api = f"https://api.github.com/repos/{repo}/issues/{issue_number}/comments"
-          headers = {
-              "Authorization": f"token {gh_token}",
-              "Accept": "application/vnd.github+json",
+          owner, repo_name = repo.split("/", 1)
+          comment_url = f"https://api.github.com/repos/{owner}/{repo_name}/issues/{num}/comments"
+
+          gh_headers = {
+              "Authorization": f"Bearer {gh_token}",
               "Content-Type": "application/json",
-              "User-Agent": "issue-llm-bot",
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "issue-llm-bot"
           }
-          http_json(api, headers, {"body": comment_body})
-          print("OK: comment posted")
+
+          body_md = f"<!-- generated by Issue LLM Bot ({used}) -->\n\n{reply_text}\n"
+          post_json(comment_url, gh_headers, {"body": body_md})
+
+          print("Comment posted.")
           PY
