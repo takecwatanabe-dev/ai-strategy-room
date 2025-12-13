@@ -1,3 +1,12 @@
+# Issue LLM Bot v0.1.0
+# Build: 2025-12-13 JST
+# Purpose:
+#  - [TASK] で始まるIssueが opened / reopened されたら、自動でコメント返信する
+#  - OpenAI → 失敗したら Gemini にフォールバック
+# Notes:
+#  - APIキーは secrets から参照（ログに出さない）
+#  - secrets名: OPENAI_API_KEY / GEMINI_API_KEY
+
 name: Issue LLM Bot
 
 on:
@@ -10,48 +19,32 @@ permissions:
 
 jobs:
   reply:
-    name: Reply to [TASK] issues
     if: startsWith(github.event.issue.title, '[TASK]')
     runs-on: ubuntu-latest
 
     steps:
-      - name: Generate reply (OpenAI -> fallback Gemini) and comment
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Generate reply (OpenAI -> fallback Gemini)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
         run: |
-          set -e
+          python - <<'PY'
+          import os, json, urllib.request
 
-          python3 - <<'PY'
-          import os, json, urllib.request, urllib.error
-
-          def post_json(url, headers, payload, timeout=30):
-              data = json.dumps(payload).encode("utf-8")
-              req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-              with urllib.request.urlopen(req, timeout=timeout) as res:
-                  return json.loads(res.read().decode("utf-8"))
-
-          def safe_str(x):
-              return "" if x is None else str(x)
-
-          title = safe_str(os.environ.get("ISSUE_TITLE"))
-          body  = safe_str(os.environ.get("ISSUE_BODY"))
-          num   = safe_str(os.environ.get("ISSUE_NUMBER"))
-          repo  = safe_str(os.environ.get("REPO"))  # "owner/repo"
-          gh_token = safe_str(os.environ.get("GH_TOKEN"))
-
-          openai_key = safe_str(os.environ.get("OPENAI_API_KEY")).strip()
-          gemini_key = safe_str(os.environ.get("GEMINI_API_KEY")).strip()
+          title = (os.getenv("ISSUE_TITLE") or "").strip()
+          body  = (os.getenv("ISSUE_BODY")  or "").strip()
 
           prompt = f"""あなたはプロジェクト補助AIです。
-          ユーザーは「コピペ量」を減らしたいので、回答は短く・実行しやすく。
+          ユーザーは「コピペ量を減らしたい」ので、回答は短く・実行しやすく。
 
-          以下の形式で、日本語Markdownで返してください:
+          次の形式で日本語Markdownで返してください:
           1) 要旨（1〜2行）
           2) 次の1アクション（クリック/入力まで具体）
           3) うまくいかない時の分岐（A/Bで2つまで）
@@ -64,106 +57,94 @@ jobs:
           {body}
           """
 
-          reply_text = None
-          used = None
+          def call_openai(p: str) -> str:
+            api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+            if not api_key:
+              raise RuntimeError("OPENAI_API_KEY missing")
 
-          # 1) OpenAI (try Responses API -> fallback Chat Completions)
-          if openai_key:
-              try:
-                  headers = {
-                      "Authorization": f"Bearer {openai_key}",
-                      "Content-Type": "application/json",
-                  }
-                  # Responses API (preferred)
-                  try:
-                      r = post_json(
-                          "https://api.openai.com/v1/responses",
-                          headers,
-                          {
-                              "model": "gpt-4o-mini",
-                              "input": prompt,
-                              "max_output_tokens": 600
-                          },
-                      )
-                      reply_text = (r.get("output_text") or "").strip()
-                      if not reply_text:
-                          # Try to extract from structured output
-                          out = r.get("output", [])
-                          parts = []
-                          for item in out:
-                              for c in item.get("content", []):
-                                  if c.get("type") == "output_text" and c.get("text"):
-                                      parts.append(c["text"])
-                          reply_text = ("\n".join(parts)).strip() if parts else None
-                      used = "OpenAI(responses)"
-                  except Exception:
-                      # Chat Completions API
-                      r = post_json(
-                          "https://api.openai.com/v1/chat/completions",
-                          headers,
-                          {
-                              "model": "gpt-4o-mini",
-                              "messages": [{"role": "user", "content": prompt}],
-                              "max_tokens": 600,
-                              "temperature": 0.2,
-                          },
-                      )
-                      reply_text = r["choices"][0]["message"]["content"].strip()
-                      used = "OpenAI(chat.completions)"
-              except Exception:
-                  reply_text = None
-                  used = None
+            url = "https://api.openai.com/v1/chat/completions"
+            payload = {
+              "model": "gpt-4o-mini",
+              "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": p}
+              ],
+              "temperature": 0.2
+            }
 
-          # 2) Gemini fallback
-          if (not reply_text) and gemini_key:
-              try:
-                  url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + gemini_key
-                  headers = {"Content-Type": "application/json"}
-                  r = post_json(
-                      url,
-                      headers,
-                      {
-                          "contents": [
-                              {"role": "user", "parts": [{"text": prompt}]}
-                          ]
-                      },
-                  )
-                  cand = (r.get("candidates") or [{}])[0]
-                  content = cand.get("content") or {}
-                  parts = content.get("parts") or []
-                  texts = [p.get("text","") for p in parts if p.get("text")]
-                  reply_text = ("\n".join(texts)).strip() if texts else None
-                  used = "Gemini"
-              except Exception:
-                  reply_text = None
-                  used = None
+            req = urllib.request.Request(
+              url,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+              }
+            )
+            with urllib.request.urlopen(req, timeout=40) as r:
+              data = json.loads(r.read().decode("utf-8"))
+            return data["choices"][0]["message"]["content"].strip()
 
-          if not reply_text:
-              reply_text = (
-                  "1) 要旨\n"
-                  "自動返信に失敗しました（APIキー未設定 or API呼び出し失敗）。\n\n"
-                  "2) 次の1アクション\n"
-                  "Settings → Secrets and variables → Actions で OPENAI_API_KEY / GEMINI_API_KEY を確認して、もう一度 Issue を Close→Reopen。\n\n"
-                  "3) うまくいかない時の分岐\n"
-                  "A) Actionsの該当Runを開き、失敗したStepのログを貼る（秘密情報は除く）\n"
-                  "B) いったん OPENAI_API_KEY だけにして再テスト\n\n"
-                  "4) 注意点\n"
-                  "APIキー本文は貼らない（Secretsに入れるだけでOK）。"
+          def call_gemini(p: str) -> str:
+            api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+            if not api_key:
+              raise RuntimeError("GEMINI_API_KEY missing")
+
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+            payload = {
+              "contents": [{"role": "user", "parts": [{"text": p}]}],
+              "generationConfig": {"temperature": 0.2}
+            }
+
+            req = urllib.request.Request(
+              url,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=40) as r:
+              data = json.loads(r.read().decode("utf-8"))
+
+            cand = (data.get("candidates") or [{}])[0]
+            parts = (((cand.get("content") or {}).get("parts")) or [])
+            text = "".join([x.get("text", "") for x in parts]).strip()
+            if not text:
+              raise RuntimeError("Gemini empty response")
+            return text
+
+          used = ""
+          try:
+            reply = call_openai(prompt)
+            used = "OpenAI"
+          except Exception as e:
+            try:
+              reply = call_gemini(prompt)
+              used = "Gemini"
+            except Exception as e2:
+              reply = (
+                "自動返信に失敗しました。\n\n"
+                f"- OpenAI: {type(e).__name__}\n"
+                f"- Gemini: {type(e2).__name__}\n\n"
+                "（管理者向け）Actionsのログを確認してください。"
               )
-              used = "Fallback message"
+              used = "FallbackError"
 
-          owner, repo_name = repo.split("/", 1)
-          comment_url = f"https://api.github.com/repos/{owner}/{repo_name}/issues/{num}/comments"
+          reply = reply + f"\n\n---\n_bot: {used}_"
 
-          gh_headers = {
-              "Authorization": f"Bearer {gh_token}",
-              "Content-Type": "application/json",
-              "Accept": "application/vnd.github+json",
-              "User-Agent": "issue-llm-bot"
-          }
+          with open("reply.md", "w", encoding="utf-8") as f:
+            f.write(reply)
 
-          body_md = f"<!-- generated by Issue LLM Bot ({used}) -->\n\n{reply_text}\n"
-          post_json(comment_url, gh_headers, {"body": body_md})
-
-          print("Comment posted.")
+          print("reply.md generated")
           PY
+
+      - name: Post comment to issue
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('reply.md', 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body
+            });
