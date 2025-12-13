@@ -1,10 +1,11 @@
 # Issue LLM Bot
 # Version: v1.0.0
-# Build: 2025-12-14 00:04 JST
+# Build: 2025-12-14 00:19 JST
 # Changes:
-# - YAML崩れを避けるため Issue情報はGITHUB_EVENT_PATHから読む
-# - [TASK] タイトルのみ反応
-# - opened / reopened どちらでも起動
+#  - YAML構文が崩れない形に整理
+#  - 既にbotコメントがあるIssueには二重投稿しない（重複防止）
+#  - OpenAI→失敗時Geminiへフォールバック
+#  - [TASK]で始まるIssueだけ反応
 
 name: Issue LLM Bot
 
@@ -13,8 +14,8 @@ on:
     types: [opened, reopened]
 
 permissions:
-  contents: read
   issues: write
+  contents: read
 
 concurrency:
   group: issue-llm-bot-${{ github.event.issue.number }}
@@ -24,138 +25,137 @@ jobs:
   reply:
     if: startsWith(github.event.issue.title, '[TASK]')
     runs-on: ubuntu-latest
-
     steps:
       - name: Generate reply (OpenAI -> fallback Gemini) and comment
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
-          set -euo pipefail
+          set -e
           python3 - <<'PY'
           import os, json, urllib.request, urllib.error
 
-          def http_json(url, method="GET", headers=None, data=None, timeout=30):
-              headers = headers or {}
-              if data is not None:
-                  if isinstance(data, (dict, list)):
-                      data = json.dumps(data).encode("utf-8")
-                      headers.setdefault("Content-Type", "application/json")
-                  elif isinstance(data, str):
-                      data = data.encode("utf-8")
-              req = urllib.request.Request(url, method=method, headers=headers, data=data)
-              try:
-                  with urllib.request.urlopen(req, timeout=timeout) as r:
-                      return r.status, r.read().decode("utf-8", errors="replace")
-              except urllib.error.HTTPError as e:
-                  body = e.read().decode("utf-8", errors="replace") if e.fp else ""
-                  return e.code, body
-              except Exception as e:
-                  return 0, str(e)
+          REPO = os.environ["REPO"]
+          ISSUE_NUMBER = os.environ["ISSUE_NUMBER"]
+          TITLE = (os.environ.get("ISSUE_TITLE") or "").strip()
+          BODY = (os.environ.get("ISSUE_BODY") or "").strip()
+          GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") or ""
 
-          # Read event payload safely (avoids YAML multiline issues)
-          event_path = os.getenv("GITHUB_EVENT_PATH", "")
-          if not event_path:
-              raise RuntimeError("GITHUB_EVENT_PATH is missing")
-          with open(event_path, "r", encoding="utf-8") as f:
-              event = json.load(f)
+          OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or ""
+          GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or ""
 
-          issue = event.get("issue", {}) or {}
-          title = (issue.get("title") or "").strip()
-          body = (issue.get("body") or "").strip()
-          number = issue.get("number")
-          repo = os.getenv("GITHUB_REPOSITORY", "").strip()
+          BOT_MARK = "<!-- issue-llm-bot -->"
 
-          if not repo or not number:
-              raise RuntimeError("Missing repo or issue number")
+          def http_json(url, method="GET", headers=None, data=None, timeout=60):
+            if headers is None: headers = {}
+            if data is not None and not isinstance(data, (bytes, bytearray)):
+              data = json.dumps(data).encode("utf-8")
+              headers.setdefault("Content-Type", "application/json; charset=utf-8")
+            req = urllib.request.Request(url, data=data, method=method, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as res:
+              raw = res.read().decode("utf-8")
+              return json.loads(raw) if raw else {}
 
-          prompt = f"""あなたはプロジェクト補助AIです。
-          ユーザーは「コピペ量を減らしたい」ので、回答は短く・実行しやすく。
+          def gh_headers():
+            return {
+              "Authorization": f"Bearer {GITHUB_TOKEN}",
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "issue-llm-bot"
+            }
 
-          以下のIssue内容から、次を日本語Markdownで返してください:
+          # 1) 既にbotコメントがあるなら何もしない（重複防止）
+          comments_url = f"https://api.github.com/repos/{REPO}/issues/{ISSUE_NUMBER}/comments?per_page=100"
+          try:
+            comments = http_json(comments_url, headers=gh_headers())
+            for c in comments:
+              if BOT_MARK in (c.get("body") or ""):
+                print("Bot comment already exists. Skip.")
+                raise SystemExit(0)
+          except urllib.error.HTTPError as e:
+            # コメント取得に失敗しても、返信自体は試す（ただし投稿が403なら後でわかる）
+            print("Warning: failed to fetch comments:", e)
+
+          prompt = f"""あなたはプロジェクト補助AIです。返信は日本語で、短く、実行しやすく。
+
           1) 要旨（1〜2行）
           2) 次の1アクション（クリック/入力まで具体）
           3) うまくいかない時の分岐（A/Bで2つまで）
-          4) 注意点（秘密情報は貼らない等、1〜2行）
+          4) 注意点（秘密情報は貼らない、など1〜2行）
 
           --- Issue Title ---
-          {title}
+          {TITLE}
 
           --- Issue Body ---
-          {body}
+          {BODY}
           """
 
-          def generate_openai(text):
-              api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
-              if not api_key:
-                  raise RuntimeError("OPENAI_API_KEY missing")
-              url = "https://api.openai.com/v1/chat/completions"
-              payload = {
-                  "model": "gpt-4o-mini",
-                  "messages": [
-                      {"role": "system", "content": "You are a helpful assistant."},
-                      {"role": "user", "content": text}
-                  ],
-                  "temperature": 0.2
-              }
-              st, resp = http_json(url, method="POST", headers={
-                  "Authorization": f"Bearer {api_key}",
-                  "Content-Type": "application/json",
-              }, data=payload)
-              if st != 200:
-                  raise RuntimeError(f"OpenAI error {st}: {resp[:300]}")
-              obj = json.loads(resp)
-              return obj["choices"][0]["message"]["content"].strip()
+          def call_openai(p):
+            if not OPENAI_API_KEY:
+              raise RuntimeError("OPENAI_API_KEY is empty")
+            url = "https://api.openai.com/v1/chat/completions"
+            payload = {
+              "model": "gpt-4o-mini",
+              "messages": [
+                {"role":"system","content":"You are a concise Japanese project assistant."},
+                {"role":"user","content": p}
+              ],
+              "temperature": 0.2,
+              "max_tokens": 500
+            }
+            headers = {
+              "Authorization": f"Bearer {OPENAI_API_KEY}",
+              "Content-Type": "application/json"
+            }
+            r = http_json(url, method="POST", headers=headers, data=payload, timeout=90)
+            return (r.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
 
-          def generate_gemini(text):
-              api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
-              if not api_key:
-                  raise RuntimeError("GEMINI_API_KEY missing")
-              url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-              payload = {
-                  "contents": [{"role": "user", "parts": [{"text": text}]}],
-                  "generationConfig": {"temperature": 0.2}
-              }
-              st, resp = http_json(url, method="POST", headers={"Content-Type": "application/json"}, data=payload)
-              if st != 200:
-                  raise RuntimeError(f"Gemini error {st}: {resp[:300]}")
-              obj = json.loads(resp)
-              cand = (obj.get("candidates") or [])
-              if not cand:
-                  raise RuntimeError("Gemini no candidates")
-              parts = (cand[0].get("content", {}) or {}).get("parts", []) or []
-              out = "".join(p.get("text", "") for p in parts).strip()
-              if not out:
-                  raise RuntimeError("Gemini empty output")
-              return out
+          def call_gemini(p):
+            if not GEMINI_API_KEY:
+              raise RuntimeError("GEMINI_API_KEY is empty")
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            payload = {
+              "contents": [{"role":"user","parts":[{"text": p}]}],
+              "generationConfig": {"temperature": 0.2, "maxOutputTokens": 600}
+            }
+            r = http_json(url, method="POST", headers={"Content-Type":"application/json"}, data=payload, timeout=90)
+            cands = r.get("candidates") or []
+            if not cands:
+              return ""
+            parts = (((cands[0].get("content") or {}).get("parts")) or [])
+            text = "\n".join([x.get("text","") for x in parts]).strip()
+            return text
 
+          used = ""
+          reply = ""
           try:
-              reply = generate_openai(prompt)
-              used = "OpenAI"
-          except Exception as e1:
-              try:
-                  reply = generate_gemini(prompt)
-                  used = "Gemini"
-              except Exception as e2:
-                  reply = f"自動返信に失敗しました。\n\n- OpenAI: {e1}\n- Gemini: {e2}"
-                  used = "ERROR"
+            reply = call_openai(prompt)
+            used = "OpenAI"
+          except Exception as e:
+            print("OpenAI failed:", e)
+            try:
+              reply = call_gemini(prompt)
+              used = "Gemini"
+            except Exception as e2:
+              print("Gemini failed:", e2)
+              reply = "要旨\n処理に失敗しました。\n\n次の1アクション\nActionsのログを開いて、最初の赤いエラー1行をここに貼ってください。\n\nうまくいかない時の分岐\nA. Secrets名が違う → OPENAI_API_KEY / GEMINI_API_KEY を確認\nB. 権限不足 → Workflow permissions / issues:write を確認\n\n注意点\n秘密情報（APIキー等）は貼らないでください。"
+              used = "Fallback"
 
-          comment_body = (reply.strip() + f"\n\n---\n_bot: {used}_").strip()
+          if not reply:
+            reply = "要旨\n返信が空でした。\n\n次の1アクション\nIssue本文を1行でも入れて、いったんClose→Reopenしてください。\n\nうまくいかない時の分岐\nA. Secrets未設定 → OPENAI_API_KEY / GEMINI_API_KEY を登録\nB. 権限不足 → issues: write を付与\n\n注意点\n秘密情報は貼らないでください。"
 
-          gh_token = (os.getenv("GITHUB_TOKEN") or "").strip()
-          if not gh_token:
-              raise RuntimeError("GITHUB_TOKEN missing")
+          comment_body = f"""{BOT_MARK}
+          {reply}
 
-          gh_url = f"https://api.github.com/repos/{repo}/issues/{number}/comments"
-          st, resp = http_json(gh_url, method="POST", headers={
-              "Authorization": f"Bearer {gh_token}",
-              "Accept": "application/vnd.github+json",
-              "X-GitHub-Api-Version": "2022-11-28",
-              "User-Agent": "issue-llm-bot"
-          }, data={"body": comment_body})
+          ---
+          bot: {used}
+          """
 
-          if st not in (200, 201):
-              raise RuntimeError(f"GitHub comment failed {st}: {resp[:500]}")
-          print("OK")
+          post_url = f"https://api.github.com/repos/{REPO}/issues/{ISSUE_NUMBER}/comments"
+          http_json(post_url, method="POST", headers=gh_headers(), data={"body": comment_body}, timeout=60)
+          print("Comment posted.")
           PY
