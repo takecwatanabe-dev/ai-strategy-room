@@ -1,106 +1,45 @@
-name: LLM Smoke Test
+name: LLM Smoke Test (Simple)
 
 on:
   workflow_dispatch:
-    inputs:
-      openai_model:
-        description: "OpenAI model (change if your account doesn't have the default)"
-        required: false
-        default: "gpt-5.2"
-      gemini_model:
-        description: "Gemini model"
-        required: false
-        default: "gemini-2.5-flash"
-      prompt:
-        description: "Test prompt"
-        required: false
-        default: "Reply with exactly: OK"
 
 jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - name: OpenAI (Responses API)
+      - name: OpenAI auth check (list models)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: ${{ inputs.openai_model }}
-          PROMPT: ${{ inputs.prompt }}
         run: |
           set -e
-          echo "== OpenAI =="
-          req=$(python3 - <<'PY'
-import json, os
-print(json.dumps({
-  "model": os.environ["OPENAI_MODEL"],
-  "input": os.environ["PROMPT"],
-  "max_output_tokens": 32
-}))
-PY
-)
-          resp=$(curl -sS https://api.openai.com/v1/responses \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $OPENAI_API_KEY" \
-            -d "$req")
-          echo "$resp" > openai.json
+          code=$(curl -sS -o openai_models.json -w "%{http_code}" \
+            https://api.openai.com/v1/models \
+            -H "Authorization: Bearer $OPENAI_API_KEY")
+          echo "OpenAI HTTP $code"
+          if [ "$code" != "200" ]; then
+            echo "OpenAI failed. See openai_models.json"
+            exit 1
+          fi
+          echo "✅ OpenAI OK"
 
-          python3 - <<'PY'
-import json
-d=json.load(open("openai.json"))
-if "error" in d:
-  raise SystemExit("OpenAI error: " + str(d["error"]))
-txt=""
-try:
-  # typical shape: output[0].content[*].text
-  for part in d["output"][0]["content"]:
-    if isinstance(part, dict) and "text" in part:
-      txt += part["text"]
-except Exception:
-  txt = d.get("output_text","")
-print("OpenAI text:", (txt or "").strip()[:200])
-PY
-
-      - name: Gemini (generateContent)
+      - name: Gemini auth check (list models)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: ${{ inputs.gemini_model }}
-          PROMPT: ${{ inputs.prompt }}
         run: |
           set -e
-          echo "== Gemini =="
-          url="https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent"
-          payload=$(python3 - <<'PY'
-import json, os
-print(json.dumps({
-  "contents": [{
-    "parts": [{"text": os.environ["PROMPT"]}]
-  }]
-}))
-PY
-)
-          resp=$(curl -sS "$url" \
-            -H "x-goog-api-key: $GEMINI_API_KEY" \
-            -H "Content-Type: application/json" \
-            -X POST \
-            -d "$payload")
-          echo "$resp" > gemini.json
-
-          python3 - <<'PY'
-import json
-d=json.load(open("gemini.json"))
-if "error" in d:
-  raise SystemExit("Gemini error: " + str(d["error"]))
-txt=""
-try:
-  txt=d["candidates"][0]["content"]["parts"][0]["text"]
-except Exception:
-  txt=str(d)[:200]
-print("Gemini text:", (txt or "").strip()[:200])
-PY
+          code=$(curl -sS -o gemini_models.json -w "%{http_code}" \
+            "https://generativelanguage.googleapis.com/v1beta/models?key=$GEMINI_API_KEY")
+          echo "Gemini HTTP $code"
+          if [ "$code" != "200" ]; then
+            echo "Gemini failed. See gemini_models.json"
+            exit 1
+          fi
+          echo "✅ Gemini OK"
 
       - name: Upload raw JSON (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: llm-smoke-test-json
           path: |
-            openai.json
-            gemini.json
+            openai_models.json
+            gemini_models.json
