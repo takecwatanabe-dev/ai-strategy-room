@@ -1,0 +1,24 @@
+name: Keys Check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check secrets exist (do not print values)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -e
+          if [ -z "${GEMINI_API_KEY}" ]; then
+            echo "❌ GEMINI_API_KEY is missing"
+            exit 1
+          fi
+          if [ -z "${OPENAI_API_KEY}" ]; then
+            echo "❌ OPENAI_API_KEY is missing"
+            exit 1
+          fi
+          echo "✅ OK: Both GEMINI_API_KEY and OPENAI_API_KEY are available to Actions."
