@@ -1,161 +1,180 @@
-# Issue LLM Bot
-# Version: v1.0.0
-# Build: 2025-12-14 00:19 JST
+# Issue LLM Bot Workflow
+# Version: v0.1.0
+# Build(JST): 2025-12-14 00:49
 # Changes:
-#  - YAML構文が崩れない形に整理
-#  - 既にbotコメントがあるIssueには二重投稿しない（重複防止）
-#  - OpenAI→失敗時Geminiへフォールバック
-#  - [TASK]で始まるIssueだけ反応
+#  - issues opened/reopened に加えて issue_comment created でも返信
+#  - github-actions[bot] の自己ループ防止
+#  - OpenAI -> Gemini フォールバック（どちらもSecrets前提）
 
 name: Issue LLM Bot
 
 on:
   issues:
     types: [opened, reopened]
+  issue_comment:
+    types: [created]
 
 permissions:
   issues: write
   contents: read
 
-concurrency:
-  group: issue-llm-bot-${{ github.event.issue.number }}
-  cancel-in-progress: true
-
 jobs:
   reply:
-    if: startsWith(github.event.issue.title, '[TASK]')
+    if: >
+      github.actor != 'github-actions[bot]' &&
+      (
+        (github.event_name == 'issues' && startsWith(github.event.issue.title, '[TASK]')) ||
+        (github.event_name == 'issue_comment' && startsWith(github.event.issue.title, '[TASK]'))
+      )
     runs-on: ubuntu-latest
     steps:
-      - name: Generate reply (OpenAI -> fallback Gemini) and comment
+      - name: Generate reply and post comment (OpenAI -> Gemini fallback)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GITHUB_TOKEN: ${{ github.token }}
+          OPENAI_MODEL: gpt-5-mini
+          GEMINI_MODEL: gemini-1.5-flash
+
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_TITLE: ${{ github.event.issue.title || '' }}
+          ISSUE_BODY: ${{ github.event.issue.body || '' }}
+          COMMENT_BODY: ${{ github.event.comment.body || '' }}
+
           REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           python3 - <<'PY'
           import os, json, urllib.request, urllib.error
 
-          REPO = os.environ["REPO"]
-          ISSUE_NUMBER = os.environ["ISSUE_NUMBER"]
-          TITLE = (os.environ.get("ISSUE_TITLE") or "").strip()
-          BODY = (os.environ.get("ISSUE_BODY") or "").strip()
-          GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") or ""
+          def _post_github_comment(body: str):
+            token = (os.getenv("GH_TOKEN") or "").strip()
+            repo = (os.getenv("REPO") or "").strip()
+            num  = (os.getenv("ISSUE_NUMBER") or "").strip()
+            if not (token and repo and num):
+              raise RuntimeError("Missing GH_TOKEN / REPO / ISSUE_NUMBER")
 
-          OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or ""
-          GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or ""
+            url = f"https://api.github.com/repos/{repo}/issues/{num}/comments"
+            payload = {"body": body}
+            req = urllib.request.Request(
+              url,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "issue-llm-bot"
+              },
+              method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=60) as r:
+              r.read()
 
-          BOT_MARK = "<!-- issue-llm-bot -->"
+          def _call_openai(prompt: str) -> str:
+            key = (os.getenv("OPENAI_API_KEY") or "").strip()
+            if not key:
+              raise RuntimeError("OPENAI_API_KEY not set")
+            model = (os.getenv("OPENAI_MODEL") or "gpt-5-mini").strip()
 
-          def http_json(url, method="GET", headers=None, data=None, timeout=60):
-            if headers is None: headers = {}
-            if data is not None and not isinstance(data, (bytes, bytearray)):
-              data = json.dumps(data).encode("utf-8")
-              headers.setdefault("Content-Type", "application/json; charset=utf-8")
-            req = urllib.request.Request(url, data=data, method=method, headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout) as res:
-              raw = res.read().decode("utf-8")
-              return json.loads(raw) if raw else {}
-
-          def gh_headers():
-            return {
-              "Authorization": f"Bearer {GITHUB_TOKEN}",
-              "Accept": "application/vnd.github+json",
-              "User-Agent": "issue-llm-bot"
-            }
-
-          # 1) 既にbotコメントがあるなら何もしない（重複防止）
-          comments_url = f"https://api.github.com/repos/{REPO}/issues/{ISSUE_NUMBER}/comments?per_page=100"
-          try:
-            comments = http_json(comments_url, headers=gh_headers())
-            for c in comments:
-              if BOT_MARK in (c.get("body") or ""):
-                print("Bot comment already exists. Skip.")
-                raise SystemExit(0)
-          except urllib.error.HTTPError as e:
-            # コメント取得に失敗しても、返信自体は試す（ただし投稿が403なら後でわかる）
-            print("Warning: failed to fetch comments:", e)
-
-          prompt = f"""あなたはプロジェクト補助AIです。返信は日本語で、短く、実行しやすく。
-
-          1) 要旨（1〜2行）
-          2) 次の1アクション（クリック/入力まで具体）
-          3) うまくいかない時の分岐（A/Bで2つまで）
-          4) 注意点（秘密情報は貼らない、など1〜2行）
-
-          --- Issue Title ---
-          {TITLE}
-
-          --- Issue Body ---
-          {BODY}
-          """
-
-          def call_openai(p):
-            if not OPENAI_API_KEY:
-              raise RuntimeError("OPENAI_API_KEY is empty")
-            url = "https://api.openai.com/v1/chat/completions"
+            url = "https://api.openai.com/v1/responses"
             payload = {
-              "model": "gpt-4o-mini",
-              "messages": [
-                {"role":"system","content":"You are a concise Japanese project assistant."},
-                {"role":"user","content": p}
-              ],
-              "temperature": 0.2,
-              "max_tokens": 500
+              "model": model,
+              "input": prompt,
+              "max_output_tokens": 700,
+              "temperature": 0.2
             }
-            headers = {
-              "Authorization": f"Bearer {OPENAI_API_KEY}",
-              "Content-Type": "application/json"
-            }
-            r = http_json(url, method="POST", headers=headers, data=payload, timeout=90)
-            return (r.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+            req = urllib.request.Request(
+              url,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json"
+              },
+              method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=60) as r:
+              data = json.loads(r.read().decode("utf-8"))
 
-          def call_gemini(p):
-            if not GEMINI_API_KEY:
-              raise RuntimeError("GEMINI_API_KEY is empty")
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-            payload = {
-              "contents": [{"role":"user","parts":[{"text": p}]}],
-              "generationConfig": {"temperature": 0.2, "maxOutputTokens": 600}
-            }
-            r = http_json(url, method="POST", headers={"Content-Type":"application/json"}, data=payload, timeout=90)
-            cands = r.get("candidates") or []
-            if not cands:
-              return ""
-            parts = (((cands[0].get("content") or {}).get("parts")) or [])
-            text = "\n".join([x.get("text","") for x in parts]).strip()
+            text = (data.get("output_text") or "").strip()
+            if text:
+              return text
+
+            # fallback parse
+            out = []
+            for item in (data.get("output") or []):
+              for c in (item.get("content") or []):
+                t = (c.get("text") or c.get("output_text") or "").strip()
+                if t:
+                  out.append(t)
+            text = "\n".join(out).strip()
+            if not text:
+              raise RuntimeError("OpenAI returned no text")
             return text
 
-          used = ""
-          reply = ""
+          def _call_gemini(prompt: str) -> str:
+            key = (os.getenv("GEMINI_API_KEY") or "").strip()
+            if not key:
+              raise RuntimeError("GEMINI_API_KEY not set")
+            model = (os.getenv("GEMINI_MODEL") or "gemini-1.5-flash").strip()
+
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+            payload = {
+              "contents": [{"parts": [{"text": prompt}]}],
+              "generationConfig": {"temperature": 0.2, "maxOutputTokens": 700}
+            }
+            req = urllib.request.Request(
+              url,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={"Content-Type": "application/json"},
+              method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=60) as r:
+              data = json.loads(r.read().decode("utf-8"))
+
+            cands = data.get("candidates") or []
+            if not cands:
+              raise RuntimeError("Gemini returned no candidates")
+            parts = (((cands[0].get("content") or {}).get("parts")) or [])
+            text = "\n".join([(p.get("text") or "") for p in parts]).strip()
+            if not text:
+              raise RuntimeError("Gemini returned no text")
+            return text
+
+          event = (os.getenv("EVENT_NAME") or "").strip()
+          title = (os.getenv("ISSUE_TITLE") or "").strip()
+          issue_body = (os.getenv("ISSUE_BODY") or "")
+          comment_body = (os.getenv("COMMENT_BODY") or "")
+
+          src = (comment_body if event == "issue_comment" else issue_body).strip()
+          if not src:
+            src = "（本文が空でした。目的・状況・やりたいことを短く書いてね）"
+
+          prompt = f"""あなたはプロジェクト補助AIです。日本語で、短く、実行しやすく返してください。
+出力は必ず次の4つの見出しを含めてください（Markdown）:
+1) 要旨（1〜2行）
+2) 次の1アクション（クリック/入力まで具体。アクションは1つだけ）
+3) うまくいかない時の分岐（A/Bで2つまで）
+4) 注意点（秘密情報は貼らない、など1〜2行）
+
+補足:
+- 画像が貼られている場合、本文に <img ...> や URL が含まれます。読み飛ばさず「画像あり」として扱ってOK。
+- 技術用語はできるだけ避け、必要なら（短い説明）を添える。
+
+--- Issue Title ---
+{title}
+
+--- Input ---
+{src}
+"""
+
+          used = "OpenAI"
           try:
-            reply = call_openai(prompt)
-            used = "OpenAI"
-          except Exception as e:
-            print("OpenAI failed:", e)
-            try:
-              reply = call_gemini(prompt)
-              used = "Gemini"
-            except Exception as e2:
-              print("Gemini failed:", e2)
-              reply = "要旨\n処理に失敗しました。\n\n次の1アクション\nActionsのログを開いて、最初の赤いエラー1行をここに貼ってください。\n\nうまくいかない時の分岐\nA. Secrets名が違う → OPENAI_API_KEY / GEMINI_API_KEY を確認\nB. 権限不足 → Workflow permissions / issues:write を確認\n\n注意点\n秘密情報（APIキー等）は貼らないでください。"
-              used = "Fallback"
+            text = _call_openai(prompt)
+          except Exception:
+            used = "Gemini"
+            text = _call_gemini(prompt)
 
-          if not reply:
-            reply = "要旨\n返信が空でした。\n\n次の1アクション\nIssue本文を1行でも入れて、いったんClose→Reopenしてください。\n\nうまくいかない時の分岐\nA. Secrets未設定 → OPENAI_API_KEY / GEMINI_API_KEY を登録\nB. 権限不足 → issues: write を付与\n\n注意点\n秘密情報は貼らないでください。"
-
-          comment_body = f"""{BOT_MARK}
-          {reply}
-
-          ---
-          bot: {used}
-          """
-
-          post_url = f"https://api.github.com/repos/{REPO}/issues/{ISSUE_NUMBER}/comments"
-          http_json(post_url, method="POST", headers=gh_headers(), data={"body": comment_body}, timeout=60)
-          print("Comment posted.")
+          final = text.strip() + f"\n\n---\nbot: {used}"
+          _post_github_comment(final)
           PY
