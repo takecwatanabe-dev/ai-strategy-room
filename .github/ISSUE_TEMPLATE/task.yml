@@ -1,39 +1,15 @@
-# TASK ISSUE FORM — v0.4.0
-# Build: 2025-12-14 15:00 JST
-# Changes:
-# - YAML破損（Critical）を回避する安全な構造に統一
-# - すべての入力を optional（空欄OK）に固定
-# - 画像貼り付け導線を最上段で明瞭化
-
 name: "TASK（自動返信）"
-description: "Botが「要旨＋次の1アクション」を返します（画像だけでもOK）"
+description: "Botが「要旨＋次の1アクション」を返します（空欄OK）"
 title: "[TASK] "
 labels: ["task"]
 
 body:
-  - type: markdown
-    attributes:
-      value: |
-        ### 使い方（最短）
-        - **画像だけでOK**：この下の「画像添付（任意）」に **ドラッグ＆ドロップ** または **貼り付け（Ctrl+V）**
-        - 文章があるなら「依頼内容」に **1行だけ** でもOK
-        - 承認して進めるときは、Issue作成後のコメント欄に **/approve** と書いてください
-
-  - type: textarea
-    id: images
-    attributes:
-      label: "画像添付（任意）"
-      description: "ここにスクショ画像をドラッグ＆ドロップ／貼り付け（Ctrl+V）OK（複数OK）"
-      placeholder: "ここに画像をドロップ（または貼り付け）"
-    validations:
-      required: false
-
   - type: textarea
     id: purpose
     attributes:
       label: "目的（1行）"
       description: "例）コピー量を減らして、次の作業が迷いなく進むようにする"
-      placeholder: "目的を1行で"
+      placeholder: "目的を1行で（空欄でもOK）"
     validations:
       required: false
 
@@ -41,10 +17,8 @@ body:
     id: request
     attributes:
       label: "依頼内容（やりたいこと）"
-      description: "箇条書きでOK（空欄でも作成できます）"
-      placeholder: |
-        〜したい
-        〜を確認したい
+      description: "箇条書きでOK（空欄でもOK）"
+      placeholder: "〜したい\n〜を確認したい"
     validations:
       required: false
 
@@ -52,7 +26,23 @@ body:
     id: context
     attributes:
       label: "背景／状況（必要なら）"
-      description: "前提・制約・いま困っていること（短く）"
+      description: "前提・制約・いま困っていること（短く／空欄でもOK）"
       placeholder: "例）Issue返信の形式を固定したい"
     validations:
       required: false
+
+  - type: textarea
+    id: images
+    attributes:
+      label: "画像添付（任意）"
+      description: "ここにスクショ画像をドラッグ＆ドロップ / 貼り付け（Ctrl+V）OK（複数OK）"
+      placeholder: "ここに画像をドロップ（または貼り付け）"
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        **注意**
+        - APIキー等の秘密情報は貼らないでください。
+        - 承認して次へ進めるときは、コメント欄に **/approve** と書いてください（それでRexへ自動で投げます）。
