@@ -46,3 +46,7 @@ body:
     attributes:
       value: |
         **注意：APIキーなど秘密情報は貼らないでください。**
+  - type: markdown
+    attributes:
+      value: |
+        ✅ 承認は「Issue作成後のコメント欄」に **/approve** と書いてください（それでRexへ自動で投げます）。
