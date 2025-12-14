@@ -1,23 +1,27 @@
+# .github/ISSUE_TEMPLATE/task.yml
+# ISSUE FORM: TASK（自動返信）
+# VERSION: v0.2.0-issuebot-details-01
+# BUILD(JST): 2025-12-14 13:58
 name: "TASK（自動返信）"
-description: "Botが要旨と次の1アクションを返します（画像だけでもOK）"
+description: "Botが要旨＋次の1アクションを返します（画像だけでもOK）"
 title: "[TASK] "
 labels: ["task"]
-
 body:
-  - type: markdown
-    attributes:
-      value: |
-        ✅ **画像だけでもOK**（本文は空欄でも作成できます）
-        - 画像は下の「画像添付（任意）」に **ドラッグ＆ドロップ** または **貼り付け（Ctrl+V）**
-        - 作成後、承認するならコメント欄に **/approve**
-        - 注意：APIキーなどの秘密情報は貼らないでください
-
   - type: textarea
     id: purpose
     attributes:
       label: "目的（1行）"
       description: "例）コピペ量を減らして、次の作業が迷いなく進むようにする"
-      placeholder: "目的を1行で（空欄OK）"
+      placeholder: "目的を1行で"
+    validations:
+      required: false
+
+  - type: textarea
+    id: request
+    attributes:
+      label: "依頼内容（やりたいこと）"
+      description: "箇条書きでOK。画像だけでもOK（空欄可）"
+      placeholder: "〜したい\n〜を確認したい"
     validations:
       required: false
 
@@ -31,21 +35,10 @@ body:
       required: false
 
   - type: textarea
-    id: request
-    attributes:
-      label: "依頼内容（やりたいこと）"
-      description: "箇条書きでOK（空欄でも作成できます）"
-      placeholder: |
-        〜したい
-        〜を確認したい
-    validations:
-      required: false
-
-  - type: textarea
     id: images
     attributes:
       label: "画像添付（任意）"
-      description: "ここにスクショ画像をドラッグ＆ドロップ／貼り付け（Ctrl+V）OK（複数OK）"
+      description: "ここにスクショ画像をドラッグ＆ドロップ／貼り付け（Ctrl+V）でOK（複数OK）"
       placeholder: "ここに画像をドロップ（または貼り付け）"
     validations:
       required: false
@@ -53,4 +46,6 @@ body:
   - type: markdown
     attributes:
       value: |
-        ✅ 承認は「Issue作成後のコメント欄」に **/approve** と書いてください（それでRexへ投げる合図にします）。
+        **注意**
+        - 秘密情報（APIキー等）は貼らないでください。
+        - 承認は「Issue作成後のコメント欄」に `/approve` と書いてください（次工程へ進める合図）。
