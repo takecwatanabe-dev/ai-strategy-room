@@ -1,302 +1,170 @@
-# =========================================================
-# ISSUE LLM BOT WORKFLOW
-# Version: v0.3.0
-# Build(JST): 2025-12-14 11:23
-# File: .github/workflows/issue-llm-bot.yml
-#
-# 目的:
-# - [TASK] Issue の opened/reopened で Bot が要旨/次の1アクションを返す
-# - 画像リンクを「別タブを開かない」HTML <img> でプレビュー表示する
-# - /approve コメントを受けて承認受付を返す（将来 Rex 連携の起点）
-#
-# 必要(どちらか一方でOK):
-# - Secrets: GEMINI_API_KEY  (推奨)
-# - Secrets: OPENAI_API_KEY  (任意)
-#
-# 任意:
-# - Variables: GEMINI_MODEL (例: gemini-1.5-pro)
-# - Variables: OPENAI_MODEL (例: gpt-4o-mini 等)
-# =========================================================
-
+# .github/workflows/issue-llm-bot.yml
 name: Issue LLM Bot
 
 on:
   issues:
     types: [opened, reopened]
-  issue_comment:
-    types: [created]
-  workflow_dispatch: {}
 
 permissions:
-  contents: read
   issues: write
-
-concurrency:
-  group: issue-llm-bot-${{ github.repository }}-${{ github.event.issue.number || github.event.comment.issue_url }}
-  cancel-in-progress: true
+  contents: read
 
 jobs:
-  bot:
+  reply:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Run bot
+      - name: Build bot reply and post/update comment
         uses: actions/github-script@v7
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
-          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4o-mini' }}
         with:
           script: |
+            /**
+             * Issue LLM Bot v0.3.0
+             * Build(JST): 2025-12-14 11:44
+             * Output: 要旨 / 次の1アクション / 分岐 / 注意 + 添付画像（プレビュー）
+             * Note: GitHub上の画像UIは制約あり → <details>で「開閉」を提供
+             */
+
             const owner = context.repo.owner;
-            const repo  = context.repo.repo;
+            const repo = context.repo.repo;
+            const issue_number = context.payload.issue.number;
 
-            // -----------------------------
-            // Helpers
-            // -----------------------------
-            const uniq = (arr) => Array.from(new Set(arr.filter(Boolean)));
-
-            function pickLabelNames(labels) {
-              if (!labels) return [];
-              return labels.map(l => typeof l === 'string' ? l : l?.name).filter(Boolean);
-            }
-
-            function isTaskIssue(issue) {
-              const title = (issue?.title || '').trim();
-              const labels = pickLabelNames(issue?.labels || []);
-              return title.startsWith('[TASK]') || labels.includes('task');
-            }
+            const marker = "<!-- ISSUE_LLM_BOT -->";
 
             function extractImageUrls(text) {
-              const body = text || '';
-              const urls = [];
+              if (!text) return [];
+              const urls = new Set();
 
-              // Markdown images: ![alt](url)
+              // Markdown: ![alt](url)
               const mdImg = /!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/g;
-              for (const m of body.matchAll(mdImg)) urls.push(m[1]);
+              let m;
+              while ((m = mdImg.exec(text)) !== null) urls.add(m[1]);
 
-              // HTML images: <img src="url"...>
-              const htmlImg = /<img[^>]*\ssrc="([^"]+)"[^>]*>/g;
-              for (const m of body.matchAll(htmlImg)) urls.push(m[1]);
+              // HTML: <img src="...">
+              const htmlImg = /<img[^>]+src=["'](https?:\/\/[^"']+)["'][^>]*>/g;
+              while ((m = htmlImg.exec(text)) !== null) urls.add(m[1]);
 
-              // Raw urls (loose): include github attachments and common image extensions
-              const raw = /(https?:\/\/[^\s<>"')]+(?:\.png|\.jpg|\.jpeg|\.gif|\.webp|githubusercontent\.com\/[^\s<>"')]+|github\.com\/user-attachments\/assets\/[^\s<>"')]+))/gi;
-              for (const m of body.matchAll(raw)) urls.push(m[1]);
+              // Fallback: direct github user-attachments/assets links
+              const assets = /(https?:\/\/github\.com\/user-attachments\/assets\/[a-zA-Z0-9\-]+)/g;
+              while ((m = assets.exec(text)) !== null) urls.add(m[1]);
 
-              // GitHub "private-user-images" domain
-              const priv = /(https?:\/\/private-user-images\.githubusercontent\.com\/[^\s<>"')]+)/gi;
-              for (const m of body.matchAll(priv)) urls.push(m[1]);
-
-              return uniq(urls);
+              return Array.from(urls);
             }
 
-            function buildImagePreviewBlock(imageUrls, max = 6) {
-              const urls = (imageUrls || []).slice(0, max);
-              if (urls.length === 0) return '（添付画像なし）';
-
-              // NOTE:
-              // - <img> だけで表示（リンクにしない）→ クリックで別タブが開きにくい
-              // - <details> で「開く/閉じる」を実現（✕ボタンの代替）
-              // - width は thumb=520、full は max-width:100% で自動フィット
-              const blocks = urls.map((u, i) => {
+            function buildDetailsPreview(urls) {
+              if (!urls.length) return "";
+              const lines = [];
+              lines.push("## 添付画像（プレビュー）");
+              lines.push("");
+              lines.push("<details>");
+              lines.push("  <summary>🖼 添付画像（クリックで開く／もう一度で閉じる）</summary>");
+              lines.push("  <br />");
+              urls.slice(0, 8).forEach((u, i) => {
                 const n = i + 1;
-                return [
-                  `<details>`,
-                  `  <summary>🖼 添付画像 ${n}（クリックで開く／もう一度で閉じる）</summary>`,
-                  `  <p><img src="${u}" width="520" style="max-width:100%;height:auto;" alt="thumb-${n}"></p>`,
-                  `  <p><img src="${u}" style="max-width:100%;height:auto;" alt="full-${n}"></p>`,
-                  `</details>`
-                ].join('\n');
+                // “幅を整える”：thumbは固定幅、fullは大きめ（GitHub側の表示に任せる）
+                lines.push(`  <p><strong>#${n}</strong></p>`);
+                lines.push(`  <p><img src="${u}" width="520" alt="thumb-${n}" /></p>`);
+                lines.push(`  <p><img src="${u}" width="860" alt="full-${n}" /></p>`);
+                lines.push("  <hr />");
               });
-
-              return blocks.join('\n\n');
+              if (urls.length > 8) {
+                lines.push(`  <p>（ほか ${urls.length - 8} 枚は省略）</p>`);
+              }
+              lines.push("</details>");
+              lines.push("");
+              lines.push("※ GitHubの仕様で、画像クリック時の挙動（別表示など）は完全には制御できません。");
+              return lines.join("\n");
             }
 
-            async function hasRecentBotComment(issue_number) {
-              // 直近コメントにマーカーがあるなら重複投稿を避ける
-              const { data } = await github.rest.issues.listComments({
-                owner, repo, issue_number, per_page: 30,
-              });
-              return data.some(c => (c?.body || '').includes('<!-- ISSUE_LLM_BOT -->'));
+            // 1) Read issue
+            const issueRes = await github.rest.issues.get({
+              owner, repo, issue_number
+            });
+
+            const issue = issueRes.data;
+            const title = issue.title || "";
+            const body = issue.body || "";
+
+            // 2) Collect image urls from issue body (commentsまで拾うならここで追加APIを呼ぶ)
+            const imageUrls = extractImageUrls(body);
+
+            // 3) Call OpenAI for summary/next action
+            const apiKey = process.env.OPENAI_API_KEY;
+            if (!apiKey) {
+              core.setFailed("OPENAI_API_KEY is not set in repository secrets.");
+              return;
+            }
+            const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+            const prompt = `
+あなたはプロジェクト運用ボットです。
+以下のIssueを読んで、日本語で「要旨」「次の1アクション」「うまくいかない時の分岐」「注意点」を短く出してください。
+- 次の1アクションは必ず1つだけ（具体的に）
+- 余計な前置きなし
+- Markdownで出力
+
+[Issue Title]
+${title}
+
+[Issue Body]
+${body}
+`.trim();
+
+            const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${apiKey}`
+              },
+              body: JSON.stringify({
+                model,
+                temperature: 0.2,
+                messages: [
+                  { role: "system", content: "出力は必ず日本語。短く、実務的に。" },
+                  { role: "user", content: prompt }
+                ]
+              })
+            });
+
+            if (!openaiRes.ok) {
+              const t = await openaiRes.text();
+              core.setFailed(`OpenAI API error: ${openaiRes.status} ${t}`);
+              return;
             }
 
-            async function postComment(issue_number, body) {
+            const openaiJson = await openaiRes.json();
+            const aiText = (openaiJson.choices?.[0]?.message?.content || "").trim();
+
+            // 4) Build final comment
+            const previewBlock = buildDetailsPreview(imageUrls);
+            const finalBody = [
+              marker,
+              "bot: OpenAI",
+              "",
+              aiText,
+              "",
+              previewBlock
+            ].filter(Boolean).join("\n");
+
+            // 5) Update existing bot comment if exists, else create new
+            const commentsRes = await github.rest.issues.listComments({
+              owner, repo, issue_number, per_page: 100
+            });
+
+            const existing = commentsRes.data.find(c => (c.body || "").includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo,
+                comment_id: existing.id,
+                body: finalBody
+              });
+            } else {
               await github.rest.issues.createComment({
                 owner, repo, issue_number,
-                body,
+                body: finalBody
               });
             }
-
-            async function callGemini(prompt) {
-              const key = process.env.GEMINI_API_KEY;
-              if (!key) return null;
-
-              const model = process.env.GEMINI_MODEL || 'gemini-1.5-pro';
-              const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
-
-              const payload = {
-                contents: [
-                  { role: "user", parts: [{ text: prompt }] }
-                ],
-                generationConfig: { temperature: 0.2 }
-              };
-
-              const res = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
-              });
-
-              if (!res.ok) {
-                const t = await res.text().catch(() => '');
-                core.warning(`Gemini API error: ${res.status} ${t}`);
-                return null;
-              }
-
-              const json = await res.json();
-              const text =
-                json?.candidates?.[0]?.content?.parts?.map(p => p.text).filter(Boolean).join('\n') ||
-                null;
-              return text;
-            }
-
-            async function callOpenAI(prompt) {
-              const key = process.env.OPENAI_API_KEY;
-              if (!key) return null;
-
-              // エンドポイント/モデルは環境で差し替えやすく（固定しすぎない）
-              const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-              const url = 'https://api.openai.com/v1/chat/completions';
-
-              const payload = {
-                model,
-                messages: [
-                  { role: 'system', content: 'あなたは「AI戦略会議室」の整理Botです。日本語で、短く、結論→次の1アクションの順で書いてください。' },
-                  { role: 'user', content: prompt }
-                ],
-                temperature: 0.2
-              };
-
-              const res = await fetch(url, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Authorization': `Bearer ${key}`,
-                },
-                body: JSON.stringify(payload),
-              });
-
-              if (!res.ok) {
-                const t = await res.text().catch(() => '');
-                core.warning(`OpenAI API error: ${res.status} ${t}`);
-                return null;
-              }
-
-              const json = await res.json();
-              const text = json?.choices?.[0]?.message?.content || null;
-              return text;
-            }
-
-            function fallbackSummary(issue) {
-              const title = issue?.title || '(no title)';
-              return [
-                `## 要旨`,
-                `- ${title}`,
-                ``,
-                `## 次の1アクション`,
-                `- 目的（1行）と、依頼内容（やりたいこと）をもう1段だけ具体化して書く`,
-                ``,
-                `## うまくいかない時の分岐`,
-                `A. 目的が曖昧 → まず「何を決めたいか」を1つに絞る`,
-                `B. 情報不足 → 追加スクショ/追加条件を追記する`,
-                ``,
-                `## 注意点`,
-                `- 秘密情報（APIキー等）は貼らない`,
-              ].join('\n');
-            }
-
-            // -----------------------------
-            // Main dispatch
-            // -----------------------------
-            const eventName = context.eventName;
-
-            // ---- /approve handler ----
-            if (eventName === 'issue_comment') {
-              const comment = context.payload.comment;
-              const issue = context.payload.issue;
-              const body = (comment?.body || '').trim();
-
-              if (!issue || !isTaskIssue(issue)) {
-                return; // TASK以外は無視
-              }
-
-              if (!body.includes('/approve')) {
-                return; // approve以外は無視
-              }
-
-              const issue_number = issue.number;
-
-              const ack = [
-                `<!-- ISSUE_LLM_BOT -->`,
-                `## 承認を受け取りました ✅`,
-                `- 次の工程（Rex対応）に進めてOKです。`,
-                ``,
-                `> メモ：この後の「Rexへ自動転送」は、次の改善で繋げやすい形にしてあります。`,
-              ].join('\n');
-
-              await postComment(issue_number, ack);
-              return;
-            }
-
-            // ---- issues opened/reopened handler ----
-            if (eventName === 'issues') {
-              const issue = context.payload.issue;
-              if (!issue || !isTaskIssue(issue)) return;
-
-              const issue_number = issue.number;
-
-              // 重複防止（直近に同マーカーがあれば投稿しない）
-              if (await hasRecentBotComment(issue_number)) return;
-
-              const issueBody = issue.body || '';
-              const imageUrls = extractImageUrls(issueBody);
-              const preview = buildImagePreviewBlock(imageUrls, 6);
-
-              const prompt = [
-                `あなたは「AI戦略会議室」の整理Botです。`,
-                `次のIssue本文を読み、以下の見出しで日本語で出力してください。`,
-                ``,
-                `【出力フォーマット（必須）】`,
-                `## 要旨`,
-                `## 次の1アクション（1つだけ。1アクションでできる形）`,
-                `## うまくいかない時の分岐（A/B）`,
-                `## 注意点（短く）`,
-                ``,
-                `【Issueタイトル】`,
-                `${issue.title}`,
-                ``,
-                `【Issue本文】`,
-                `${issueBody}`,
-                ``,
-                `※画像は本文中に既に貼られている前提でよい（解析は不要）。`,
-              ].join('\n');
-
-              // 1) Gemini優先 → 2) OpenAI → 3) fallback
-              let text = await callGemini(prompt);
-              if (!text) text = await callOpenAI(prompt);
-              if (!text) text = fallbackSummary(issue);
-
-              const finalComment = [
-                `<!-- ISSUE_LLM_BOT -->`,
-                `${text}`,
-                ``,
-                `## 添付画像（プレビュー）`,
-                preview,
-              ].join('\n');
-
-              await postComment(issue_number, finalComment);
-              return;
-            }
-
-            // その他イベントは何もしない
-            return;
