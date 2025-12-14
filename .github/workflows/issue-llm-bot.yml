@@ -1,170 +1,211 @@
-# .github/workflows/issue-llm-bot.yml
+# Issue LLM Bot — v0.4.0
+# Build(JST): 2025-12-14 12:01
+# Changes:
+# - [TASK] Issueの自動返信コメントに「添付画像（プレビュー）」を追加（<details>で開閉）
+# - /approve コメントで approved ラベル付与＆受付コメント
+# - 画像URL抽出（Markdown形式 + HTML <img> 両対応）
+# - Issueフォーム側が空欄でも通る運用を前提に、画像だけでも回る設計
+
 name: Issue LLM Bot
 
 on:
   issues:
     types: [opened, reopened]
+  issue_comment:
+    types: [created]
 
 permissions:
   issues: write
   contents: read
 
 jobs:
-  reply:
+  auto_reply:
+    if: github.event_name == 'issues' && startsWith(github.event.issue.title, '[TASK]')
     runs-on: ubuntu-latest
-
     steps:
-      - name: Build bot reply and post/update comment
+      - name: Generate and post LLM reply (with image preview)
         uses: actions/github-script@v7
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4o-mini' }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
         with:
           script: |
-            /**
-             * Issue LLM Bot v0.3.0
-             * Build(JST): 2025-12-14 11:44
-             * Output: 要旨 / 次の1アクション / 分岐 / 注意 + 添付画像（プレビュー）
-             * Note: GitHub上の画像UIは制約あり → <details>で「開閉」を提供
-             */
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.issue.number;
 
+            const issue = context.payload.issue || {};
+            const title = (issue.title || "").trim();
+            const body = (issue.body || "").trim();
+
+            function uniq(arr) {
+              return [...new Set(arr.filter(Boolean))];
+            }
+
+            function extractImageUrls(text) {
+              const urls = [];
+
+              // Markdown: ![alt](url)
+              const reMd = /!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/g;
+              let m;
+              while ((m = reMd.exec(text)) !== null) urls.push(m[1]);
+
+              // HTML: <img ... src="...">
+              const reImg1 = /<img[^>]+src="([^"]+)"[^>]*>/g;
+              while ((m = reImg1.exec(text)) !== null) urls.push(m[1]);
+
+              // HTML: <img ... src='...'>
+              const reImg2 = /<img[^>]+src='([^']+)'[^>]*>/g;
+              while ((m = reImg2.exec(text)) !== null) urls.push(m[1]);
+
+              return uniq(urls);
+            }
+
+            const imageUrls = extractImageUrls(body);
+
+            function buildDetails(urls) {
+              if (!urls.length) return "（添付画像なし）";
+              return urls.map((u, i) => {
+                const n = i + 1;
+                return [
+                  `<details>`,
+                  `  <summary>🖼 添付画像 ${n}（クリックで開く／もう一度で閉じる）</summary>`,
+                  `  <p><img src="${u}" width="520" alt="thumb-${n}"></p>`,
+                  `  <p><img src="${u}" alt="full-${n}"></p>`,
+                  `</details>`
+                ].join("\n");
+              }).join("\n\n");
+            }
+
+            const previewBlock = buildDetails(imageUrls);
+
+            async function callOpenAI(promptText) {
+              const apiKey = process.env.OPENAI_API_KEY;
+              if (!apiKey) {
+                return "（OPENAI_API_KEY が未設定なので、定型返信だけ出しました）";
+              }
+
+              const model = (process.env.OPENAI_MODEL && process.env.OPENAI_MODEL.trim())
+                ? process.env.OPENAI_MODEL.trim()
+                : "gpt-5"; // 例：gpt-5 :contentReference[oaicite:2]{index=2}
+
+              const res = await fetch("https://api.openai.com/v1/responses", { // :contentReference[oaicite:3]{index=3}
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "Authorization": `Bearer ${apiKey}`
+                },
+                body: JSON.stringify({
+                  model,
+                  input: [
+                    {
+                      role: "user",
+                      content: [{ type: "input_text", text: promptText }]
+                    }
+                  ]
+                })
+              });
+
+              const data = await res.json().catch(() => ({}));
+              if (!res.ok) {
+                const msg = JSON.stringify(data).slice(0, 800);
+                return `（LLM呼び出しに失敗：${res.status}）\n${msg}`;
+              }
+
+              // Prefer output_text if present, else extract from output array.
+              let out = (data && data.output_text) ? String(data.output_text) : "";
+              if (!out && data && Array.isArray(data.output)) {
+                const parts = [];
+                for (const item of data.output) {
+                  if (!item || !Array.isArray(item.content)) continue;
+                  for (const c of item.content) {
+                    if (c && c.type === "output_text" && c.text) parts.push(c.text);
+                  }
+                }
+                out = parts.join("\n");
+              }
+
+              out = (out || "").trim();
+              return out || "（LLMの返答が空でした）";
+            }
+
+            const prompt = [
+              "あなたは『AI戦略会議室』の秘書です。",
+              "次のIssueを読み、短く要点整理し、次の一手を3つに絞って提案してください。",
+              "画像がある前提で、画像から読み取れる可能性のある追加情報も“確認ポイント”として書いてください。",
+              "",
+              `■ タイトル`,
+              title,
+              "",
+              `■ 本文`,
+              body || "（本文なし）",
+              "",
+              "出力の形式：",
+              "1) 要旨（2〜4行）",
+              "2) いま決めること（最大3つ）",
+              "3) 次のアクション（最大3つ、短い手順）",
+              "4) 確認ポイント（画像や状況の追加確認）",
+            ].join("\n");
+
+            const llmText = await callOpenAI(prompt);
+
+            const commentBody = [
+              llmText,
+              "",
+              "---",
+              "",
+              "## 添付画像（プレビュー）",
+              "",
+              previewBlock,
+              "",
+              "---",
+              "",
+              "✅ **承認**：このIssueのコメント欄に `/approve` と書いてください。",
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number,
+              body: commentBody
+            });
+
+  approve:
+    if: github.event_name == 'issue_comment' && startsWith(github.event.issue.title, '[TASK]') && contains(github.event.comment.body, '/approve')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark approved + comment
+        uses: actions/github-script@v7
+        with:
+          script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const issue_number = context.payload.issue.number;
 
-            const marker = "<!-- ISSUE_LLM_BOT -->";
-
-            function extractImageUrls(text) {
-              if (!text) return [];
-              const urls = new Set();
-
-              // Markdown: ![alt](url)
-              const mdImg = /!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/g;
-              let m;
-              while ((m = mdImg.exec(text)) !== null) urls.add(m[1]);
-
-              // HTML: <img src="...">
-              const htmlImg = /<img[^>]+src=["'](https?:\/\/[^"']+)["'][^>]*>/g;
-              while ((m = htmlImg.exec(text)) !== null) urls.add(m[1]);
-
-              // Fallback: direct github user-attachments/assets links
-              const assets = /(https?:\/\/github\.com\/user-attachments\/assets\/[a-zA-Z0-9\-]+)/g;
-              while ((m = assets.exec(text)) !== null) urls.add(m[1]);
-
-              return Array.from(urls);
-            }
-
-            function buildDetailsPreview(urls) {
-              if (!urls.length) return "";
-              const lines = [];
-              lines.push("## 添付画像（プレビュー）");
-              lines.push("");
-              lines.push("<details>");
-              lines.push("  <summary>🖼 添付画像（クリックで開く／もう一度で閉じる）</summary>");
-              lines.push("  <br />");
-              urls.slice(0, 8).forEach((u, i) => {
-                const n = i + 1;
-                // “幅を整える”：thumbは固定幅、fullは大きめ（GitHub側の表示に任せる）
-                lines.push(`  <p><strong>#${n}</strong></p>`);
-                lines.push(`  <p><img src="${u}" width="520" alt="thumb-${n}" /></p>`);
-                lines.push(`  <p><img src="${u}" width="860" alt="full-${n}" /></p>`);
-                lines.push("  <hr />");
-              });
-              if (urls.length > 8) {
-                lines.push(`  <p>（ほか ${urls.length - 8} 枚は省略）</p>`);
+            async function ensureLabel(name, color, description) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+              } catch (e) {
+                if (e.status === 404) {
+                  await github.rest.issues.createLabel({ owner, repo, name, color, description });
+                } else {
+                  throw e;
+                }
               }
-              lines.push("</details>");
-              lines.push("");
-              lines.push("※ GitHubの仕様で、画像クリック時の挙動（別表示など）は完全には制御できません。");
-              return lines.join("\n");
             }
 
-            // 1) Read issue
-            const issueRes = await github.rest.issues.get({
-              owner, repo, issue_number
+            await ensureLabel("approved", "2da44e", "Approved by owner (/approve)");
+
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number,
+              labels: ["approved"]
             });
 
-            const issue = issueRes.data;
-            const title = issue.title || "";
-            const body = issue.body || "";
-
-            // 2) Collect image urls from issue body (commentsまで拾うならここで追加APIを呼ぶ)
-            const imageUrls = extractImageUrls(body);
-
-            // 3) Call OpenAI for summary/next action
-            const apiKey = process.env.OPENAI_API_KEY;
-            if (!apiKey) {
-              core.setFailed("OPENAI_API_KEY is not set in repository secrets.");
-              return;
-            }
-            const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-
-            const prompt = `
-あなたはプロジェクト運用ボットです。
-以下のIssueを読んで、日本語で「要旨」「次の1アクション」「うまくいかない時の分岐」「注意点」を短く出してください。
-- 次の1アクションは必ず1つだけ（具体的に）
-- 余計な前置きなし
-- Markdownで出力
-
-[Issue Title]
-${title}
-
-[Issue Body]
-${body}
-`.trim();
-
-            const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${apiKey}`
-              },
-              body: JSON.stringify({
-                model,
-                temperature: 0.2,
-                messages: [
-                  { role: "system", content: "出力は必ず日本語。短く、実務的に。" },
-                  { role: "user", content: prompt }
-                ]
-              })
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number,
+              body: "✅ 承認を受け取りました。次の工程に回します（必要なら追加の確認を投げます）。"
             });
-
-            if (!openaiRes.ok) {
-              const t = await openaiRes.text();
-              core.setFailed(`OpenAI API error: ${openaiRes.status} ${t}`);
-              return;
-            }
-
-            const openaiJson = await openaiRes.json();
-            const aiText = (openaiJson.choices?.[0]?.message?.content || "").trim();
-
-            // 4) Build final comment
-            const previewBlock = buildDetailsPreview(imageUrls);
-            const finalBody = [
-              marker,
-              "bot: OpenAI",
-              "",
-              aiText,
-              "",
-              previewBlock
-            ].filter(Boolean).join("\n");
-
-            // 5) Update existing bot comment if exists, else create new
-            const commentsRes = await github.rest.issues.listComments({
-              owner, repo, issue_number, per_page: 100
-            });
-
-            const existing = commentsRes.data.find(c => (c.body || "").includes(marker));
-
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner, repo,
-                comment_id: existing.id,
-                body: finalBody
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner, repo, issue_number,
-                body: finalBody
-              });
-            }
