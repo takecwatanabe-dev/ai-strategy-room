@@ -1,11 +1,10 @@
-# .github/workflows/issue-llm-bot.yml
-# ISSUE LLM BOT
-# VERSION: v0.2.0-issuebot-details-01
-# BUILD(JST): 2025-12-14 13:58
+# issue-llm-bot.yml
+# WORKFLOW VERSION: v0.1.0
+# BUILD(JST): 2025-12-14 14:27
 # CHANGES:
-# - TASK Issueの自動返信に「<details>画像プレビュー</details>」を付与
-# - /approve コメントで approved ラベル付与＆確認コメント
-# - OpenAI Responses API を使用（/v1/responses）
+# - Secrets名の揺れ（OPENAI_API_KEY / PENAI_API_KEY）を両対応に修正
+# - 添付画像を <details> で「別タブを開きにくい」プレビュー表示に統一
+# - /approve コメントで approved ラベル付け＋承認コメント
 
 name: Issue LLM Bot
 
@@ -16,25 +15,29 @@ on:
     types: [created]
 
 permissions:
-  issues: write
   contents: read
+  issues: write
 
 jobs:
-  auto_reply_task:
+  task_auto_reply:
     if: github.event_name == 'issues' && startsWith(github.event.issue.title, '[TASK]')
     runs-on: ubuntu-latest
     steps:
       - name: Post auto reply (TASK)
         uses: actions/github-script@v7
         env:
-          # 既存の Secrets 名が PENAI_API_KEY なら、そのままでOK
-          OPENAI_API_KEY: ${{ secrets.PENAI_API_KEY }}
-          OPENAI_MODEL: gpt-5-mini
+          # ★ここがポイント：どっちのSecrets名でもOKにする
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || secrets.PENAI_API_KEY }}
+          # モデルは Variables（Settings → Secrets and variables → Actions → Variables）で上書き可
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5-mini' }}
         with:
           script: |
             const issue = context.payload.issue;
             const owner = context.repo.owner;
-            const repo = context.repo.repo;
+            const repo  = context.repo.repo;
+
+            const apiKey = (process.env.OPENAI_API_KEY || '').trim();
+            const model  = (process.env.OPENAI_MODEL || 'gpt-5-mini').trim();
 
             // ---- helpers ----
             function extractImageUrls(text) {
@@ -42,125 +45,144 @@ jobs:
               if (!text) return [];
 
               // <img ... src="...">
-              const srcRe = /<img[^>]+src="([^"]+)"/gi;
+              const imgTagRe = /<img[^>]*src=["']([^"']+)["'][^>]*>/gi;
               let m;
-              while ((m = srcRe.exec(text)) !== null) {
-                urls.add(m[1]);
-              }
+              while ((m = imgTagRe.exec(text)) !== null) urls.add(m[1]);
 
-              // markdown ![](url)
-              const mdRe = /!\[[^\]]*\]\((https?:\/\/[^)]+)\)/g;
-              while ((m = mdRe.exec(text)) !== null) {
-                urls.add(m[1]);
+              // Markdown ![alt](url)
+              const mdImgRe = /!\[[^\]]*\]\(([^)]+)\)/g;
+              while ((m = mdImgRe.exec(text)) !== null) urls.add(m[1]);
+
+              // 生URL（添付系っぽいものだけ拾う）
+              const urlRe = /(https?:\/\/[^\s)<>"]+)/g;
+              while ((m = urlRe.exec(text)) !== null) {
+                const u = m[1];
+                if (
+                  u.includes('github.com/user-attachments/') ||
+                  u.includes('user-images.githubusercontent.com') ||
+                  u.includes('private-user-images.githubusercontent.com') ||
+                  u.match(/\.(png|jpg|jpeg|gif|webp)(\?.*)?$/i)
+                ) {
+                  urls.add(u);
+                }
               }
 
               return Array.from(urls);
             }
 
             function buildDetailsPreview(urls) {
-              if (!urls.length) return "";
+              if (!urls.length) return '（添付画像なし）';
 
-              const blocks = urls.map((u, i) => {
+              // 多すぎると重いので最大6枚まで
+              const limited = urls.slice(0, 6);
+
+              return limited.map((url, i) => {
                 const n = i + 1;
+                // サムネ→開くと大きめ表示（閉じるは summary をもう一度クリック）
                 return [
-                  "<details>",
-                  `  <summary>🖼 添付画像 ${n}（クリックで開く／もう一度で閉じる）</summary>`,
-                  `  <p><img src="${u}" width="520" style="max-width:100%;height:auto;" alt="thumb-${n}"></p>`,
-                  `  <p><img src="${u}" style="max-width:100%;height:auto;" alt="full-${n}"></p>`,
-                  "</details>"
-                ].join("\n");
-              }).join("\n\n");
-
-              return `## 添付画像（プレビュー）\n\n${blocks}\n`;
+                  `<details>`,
+                  `  <summary>🖼 添付画像${n}（クリックで開く／もう一度で閉じる）</summary>`,
+                  `  <p><img src="${url}" width="520" alt="thumb${n}"></p>`,
+                  `  <p><img src="${url}" alt="full${n}"></p>`,
+                  `</details>`
+                ].join('\n');
+              }).join('\n\n');
             }
 
-            async function callOpenAI({ apiKey, model, inputText }) {
-              const url = "https://api.openai.com/v1/responses";
-              const payload = {
-                model,
-                input: [
-                  {
-                    role: "system",
-                    content: [
-                      {
-                        type: "input_text",
-                        text:
-                          "あなたは『ユイ』です。日本語で、落ち着いた大人の女性の口調。やさしく、フレンドリー。下品な表現は禁止。\n" +
-                          "出力は次の見出しで固定：\n" +
-                          "## 要旨\n" +
-                          "## 次の1アクション\n" +
-                          "## 手順（Step 1→）\n" +
-                          "## うまくいかない時\n" +
-                          "## 注意\n" +
-                          "画像は添付されている前提でよいが、ここでは画像解析は不要。"
-                      }
-                    ]
-                  },
-                  {
-                    role: "user",
-                    content: [{ type: "input_text", text: inputText }]
-                  }
-                ]
-              };
+            async function postComment(body) {
+              await github.rest.issues.createComment({
+                owner, repo,
+                issue_number: issue.number,
+                body
+              });
+            }
 
-              const res = await fetch(url, {
-                method: "POST",
+            // ---- Secrets 未設定なら、ここで丁寧に案内して終了（落とさない）----
+            if (!apiKey) {
+              const msg = [
+                `## 要旨`,
+                `Bot側でAI呼び出しができませんでした（APIキーが渡っていません）。`,
+                ``,
+                `## 次のアクション（確認だけ）`,
+                `- GitHub → **Settings** → **Secrets and variables** → **Actions**`,
+                `- **Secrets** に **OPENAI_API_KEY** か **PENAI_API_KEY** のどちらかが入っているか確認`,
+                ``,
+                `（このworkflowは **OPENAI_API_KEY / PENAI_API_KEY の両方に対応**しています）`,
+                ``,
+                `---`,
+                `承認して次へ進めるときは、コメント欄に \`/approve\` と書いてください。`
+              ].join('\n');
+              await postComment(msg);
+              return;
+            }
+
+            // ---- 画像プレビュー ----
+            const urls = extractImageUrls(issue.body || '');
+            const previewBlock = buildDetailsPreview(urls);
+
+            // ---- OpenAI Responses API ----
+            const inputText = [
+              `あなたは「AI戦略会議室」の議事進行アシスタントです。`,
+              `次のIssueを読んで、短く分かりやすく：`,
+              `1) 要旨（何をしたい？）`,
+              `2) 次のアクション（1〜3個）`,
+              `3) 追加で必要な情報（あれば）`,
+              `を日本語で出してください。`,
+              ``,
+              `---`,
+              `# Title`,
+              issue.title,
+              ``,
+              `# Body`,
+              issue.body || '(empty)'
+            ].join('\n');
+
+            let aiText = '';
+            try {
+              const res = await fetch('https://api.openai.com/v1/responses', {
+                method: 'POST',
                 headers: {
-                  "Authorization": `Bearer ${apiKey}`,
-                  "Content-Type": "application/json"
+                  'Authorization': `Bearer ${apiKey}`,
+                  'Content-Type': 'application/json'
                 },
-                body: JSON.stringify(payload)
+                body: JSON.stringify({
+                  model,
+                  input: inputText,
+                  max_output_tokens: 800
+                })
               });
 
               const data = await res.json();
+
+              // 取り出し方の差に強くする
+              aiText =
+                data.output_text ||
+                (Array.isArray(data.output) && data.output[0]?.content?.[0]?.text) ||
+                (data.output?.[0]?.content?.[0]?.text) ||
+                '';
+
               if (!res.ok) {
-                throw new Error(`OpenAI API error: ${res.status} ${JSON.stringify(data).slice(0, 500)}`);
+                aiText = `（AI呼び出しに失敗：${res.status}）\n` + (aiText || JSON.stringify(data).slice(0, 800));
               }
-              return (data && data.output_text) ? data.output_text : "";
-            }
-
-            // ---- main ----
-            const body = issue.body || "";
-            const imageUrls = extractImageUrls(body);
-            const previewBlock = buildDetailsPreview(imageUrls);
-
-            const inputText =
-              `TITLE: ${issue.title}\n` +
-              `AUTHOR: ${issue.user?.login || "unknown"}\n` +
-              `BODY:\n${body}\n\n` +
-              (imageUrls.length ? `IMAGE_URLS:\n- ${imageUrls.join("\n- ")}\n` : "IMAGE_URLS: none\n");
-
-            let llmText = "";
-            try {
-              const apiKey = process.env.OPENAI_API_KEY;
-              const model = process.env.OPENAI_MODEL || "gpt-5-mini";
-              if (!apiKey) throw new Error("OPENAI_API_KEY is missing (Secrets 未設定)");
-              llmText = await callOpenAI({ apiKey, model, inputText });
             } catch (e) {
-              llmText =
-                "## 要旨\nBot側でAI呼び出しに失敗しました。\n\n" +
-                "## 次の1アクション\nSecrets（PENAI_API_KEY）が入っているか確認。\n\n" +
-                "## 手順（Step 1→）\nStep 1：Settings → Secrets and variables → Actions を開く\nStep 2：Repository secrets に PENAI_API_KEY があるか確認\n\n" +
-                "## うまくいかない時\n権限・スペル違い・改行混入を確認。\n\n" +
-                "## 注意\nAPIキーはIssue本文に貼らないでください。\n\n" +
-                `（内部エラー）${String(e.message || e).slice(0, 300)}`;
+              aiText = `（AI呼び出しに失敗：${String(e)}）`;
             }
 
-            const commentBody =
-              "### ✅ 自動返信（TASK）\n\n" +
-              (previewBlock ? (previewBlock + "\n") : "") +
-              llmText + "\n\n" +
-              "---\n" +
-              "承認して次へ進めるときは、コメント欄に `/approve` と書いてください。";
+            const comment = [
+              `## 要旨`,
+              aiText.trim() || '（AI応答なし）',
+              ``,
+              `---`,
+              `## 添付画像（プレビュー）`,
+              previewBlock,
+              ``,
+              `---`,
+              `承認して次へ進めるときは、コメント欄に \`/approve\` と書いてください。`
+            ].join('\n');
 
-            await github.rest.issues.createComment({
-              owner,
-              repo,
-              issue_number: issue.number,
-              body: commentBody
-            });
+            await postComment(comment);
 
-  approve_task:
+  task_approve:
     if: github.event_name == 'issue_comment' && startsWith(github.event.issue.title, '[TASK]') && contains(github.event.comment.body, '/approve')
     runs-on: ubuntu-latest
     steps:
@@ -168,25 +190,26 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
             const issue = context.payload.issue;
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
 
-            // ラベルが無いと失敗することがあるので、失敗しても止めない
-            try {
+            // 既に付いてたら何もしない
+            const labels = (issue.labels || []).map(l => (typeof l === 'string' ? l : l.name));
+            const hasApproved = labels.includes('approved');
+
+            if (!hasApproved) {
               await github.rest.issues.addLabels({
-                owner,
-                repo,
+                owner, repo,
                 issue_number: issue.number,
-                labels: ["approved"]
+                labels: ['approved']
               });
-            } catch (e) {
-              // ignore
             }
 
             await github.rest.issues.createComment({
-              owner,
-              repo,
+              owner, repo,
               issue_number: issue.number,
-              body: "✅ /approve を受け取りました。次工程へ進めてOKです。"
+              body: hasApproved
+                ? `✅ すでに承認済みです（approved）。`
+                : `✅ 承認を受け取りました（approved を付与）。`
             });
