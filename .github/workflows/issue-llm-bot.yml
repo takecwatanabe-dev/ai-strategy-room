@@ -3,200 +3,173 @@ name: Issue LLM Bot
 on:
   issues:
     types: [opened, reopened]
+  issue_comment:
+    types: [created]
 
 permissions:
-  issues: write
   contents: read
+  issues: write
 
 jobs:
-  task_bot:
-    if: startsWith(github.event.issue.title, '[TASK]')
+  reply:
+    if: github.event_name == 'issues' && startsWith(github.event.issue.title, '[TASK]')
     runs-on: ubuntu-latest
     steps:
-      - name: Generate response and post comment (with image preview)
+      - name: Post LLM reply as comment
+        uses: actions/github-script@v7
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENAI_MODEL: gpt-4o-mini
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
-          ISSUE_URL: ${{ github.event.issue.html_url }}
-          ACTOR: ${{ github.actor }}
-        run: |
-          python3 - <<'PY'
-          import os, json, re, sys
-          from urllib.request import Request, urlopen
-          from urllib.error import HTTPError, URLError
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          THUMB_WIDTH: "640"
+          MAX_IMAGES: "6"
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = issue.number;
 
-          def env(name, default=""):
-            return os.environ.get(name, default) or default
+            const title = issue.title || "";
+            const body = issue.body || "";
 
-          OPENAI_API_KEY = env("OPENAI_API_KEY")
-          GEMINI_API_KEY = env("GEMINI_API_KEY")
-          OPENAI_MODEL = env("OPENAI_MODEL", "gpt-4o-mini")
-
-          GITHUB_TOKEN = env("GITHUB_TOKEN")
-          REPO = env("REPO")
-          ISSUE_NUMBER = env("ISSUE_NUMBER")
-          ISSUE_TITLE = env("ISSUE_TITLE")
-          ISSUE_BODY = env("ISSUE_BODY")
-          ISSUE_URL = env("ISSUE_URL")
-          ACTOR = env("ACTOR")
-
-          if not (GITHUB_TOKEN and REPO and ISSUE_NUMBER):
-            print("Missing GitHub context envs.")
-            sys.exit(1)
-
-          def extract_image_urls(text: str):
-            if not text:
-              return []
-            urls = []
-
-            # HTML img
-            for m in re.findall(r'src="(https?://[^"]+)"', text):
-              urls.append(m)
-
-            # Markdown image
-            for m in re.findall(r'!\[[^\]]*\]\((https?://[^)]+)\)', text):
-              urls.append(m)
-
-            # Raw user-attachments link (念のため)
-            for m in re.findall(r'(https?://github\.com/user-attachments/assets/[0-9A-Za-z\-_/]+)', text):
-              urls.append(m)
-
-            # de-dup preserve order
-            seen = set()
-            out = []
-            for u in urls:
-              u = u.strip()
-              if u and u not in seen:
-                seen.add(u)
-                out.append(u)
-            return out
-
-          img_urls = extract_image_urls(ISSUE_BODY)
-
-          def build_img_preview(urls):
-            if not urls:
-              return ""
-            # 見やすさ優先：detailsで折りたたみ + width固定（GitHubで比較的安定）
-            parts = []
-            parts.append("\n\n---\n\n<details>\n<summary>添付画像（プレビュー）</summary>\n")
-            for u in urls[:6]:
-              parts.append(f'\n<img src="{u}" width="560" />\n')
-            parts.append("\n</details>\n")
-            return "".join(parts)
-
-          img_preview_md = build_img_preview(img_urls)
-
-          prompt = f"""あなたは「AI戦略会議室」の自動返信ボットです。日本語で返答してください。
-
-          # 目的
-          Issueの内容を読み、次の形式で短くまとめて返す。
-
-          # 出力フォーマット（必須）
-          ## 要旨
-          （2〜4行）
-
-          ## 次の1アクション
-          （“1個だけ”具体的に。クリック/入力が迷わない書き方）
-
-          ## うまくいかない時の分岐
-          A. （短く）
-          B. （短く）
-
-          ## 注意点
-          - 秘密情報（APIキー等）は書かない
-          - 画像は本文に貼られている前提でよい（解析は不要）
-
-          # 入力
-          - Issue Title: {ISSUE_TITLE}
-          - Issue URL: {ISSUE_URL}
-          - Actor: {ACTOR}
-          - Issue Body:
-          {ISSUE_BODY}
-          """
-
-          def http_json(url, headers, payload):
-            data = json.dumps(payload).encode("utf-8")
-            req = Request(url, data=data, headers=headers, method="POST")
-            with urlopen(req, timeout=60) as r:
-              return json.loads(r.read().decode("utf-8"))
-
-          def call_openai():
-            if not OPENAI_API_KEY:
-              raise RuntimeError("OPENAI_API_KEY missing")
-            url = "https://api.openai.com/v1/chat/completions"
-            headers = {
-              "Authorization": f"Bearer {OPENAI_API_KEY}",
-              "Content-Type": "application/json",
+            if (!process.env.OPENAI_API_KEY) {
+              core.setFailed("Missing secrets.OPENAI_API_KEY");
+              return;
             }
-            payload = {
-              "model": OPENAI_MODEL,
-              "messages": [
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": prompt},
-              ],
-              "temperature": 0.2,
-            }
-            res = http_json(url, headers, payload)
-            return res["choices"][0]["message"]["content"]
 
-          def call_gemini():
-            if not GEMINI_API_KEY:
-              raise RuntimeError("GEMINI_API_KEY missing")
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-            headers = {"Content-Type": "application/json"}
-            payload = {
-              "contents": [{
-                "parts": [{"text": prompt}]
-              }],
-              "generationConfig": {
-                "temperature": 0.2
+            const thumbWidth = parseInt(process.env.THUMB_WIDTH || "640", 10);
+            const maxImages = parseInt(process.env.MAX_IMAGES || "6", 10);
+            const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+            // --- Extract image URLs from issue body (markdown + html + raw urls)
+            function uniq(arr) {
+              return [...new Set(arr.filter(Boolean))];
+            }
+
+            const urls = [];
+
+            // Markdown: ![alt](url)
+            {
+              const re = /!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/g;
+              let m;
+              while ((m = re.exec(body)) !== null) urls.push(m[1]);
+            }
+
+            // HTML: <img ... src="url" ...>
+            {
+              const re = /<img\b[^>]*\bsrc=['"]([^'"]+)['"][^>]*>/gi;
+              let m;
+              while ((m = re.exec(body)) !== null) urls.push(m[1]);
+            }
+
+            // Raw URLs ending with common image extensions OR github user-attachments
+            {
+              const re = /(https?:\/\/[^\s<>"')]+(?:\.png|\.jpg|\.jpeg|\.gif|\.webp))(?:[\s<>"')]|$)/gi;
+              let m;
+              while ((m = re.exec(body)) !== null) urls.push(m[1]);
+            }
+            {
+              const re = /(https?:\/\/github\.com\/user-attachments\/assets\/[^\s<>"')]+)(?:[\s<>"')]|$)/gi;
+              let m;
+              while ((m = re.exec(body)) !== null) urls.push(m[1]);
+            }
+
+            const imageUrls = uniq(urls).slice(0, maxImages);
+
+            // --- Build prompt (keep the exact 4-section format)
+            const system = [
+              "あなたは『ユイ』です。日本語で、落ち着いたトーンで、簡潔に答えてください。",
+              "必ず次の4項目だけを、番号付きで出力してください：",
+              "1) 要旨（1〜2行）",
+              "2) 次の1アクション（クリック/入力まで具体）",
+              "3) うまくいかない時の分岐（A/Bで2つまで）",
+              "4) 注意点（秘密情報は貼らない、など1〜2行）",
+              "画像は解析しないでOK。本文に貼られている前提でよい。"
+            ].join("\n");
+
+            const user = [
+              "--- Issue Title ---",
+              title,
+              "",
+              "--- Issue Body ---",
+              body
+            ].join("\n");
+
+            // --- Call OpenAI (chat completions)
+            const payload = {
+              model,
+              temperature: 0.4,
+              messages: [
+                { role: "system", content: system },
+                { role: "user", content: user }
+              ]
+            };
+
+            const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
+              },
+              body: JSON.stringify(payload)
+            });
+
+            if (!resp.ok) {
+              const t = await resp.text();
+              core.setFailed(`OpenAI API error: ${resp.status} ${t}`);
+              return;
+            }
+
+            const data = await resp.json();
+            const content = data?.choices?.[0]?.message?.content?.trim() || "(no content)";
+
+            // --- Build image preview block (thumbnail width fixed)
+            let preview = "";
+            if (imageUrls.length > 0) {
+              preview += "\n\n---\n\n## 添付画像（プレビュー）\n";
+              preview += "※クリックで拡大\n";
+              for (const u of imageUrls) {
+                // Using HTML <img width="..."> to force thumbnail sizing on GitHub
+                preview += `\n<a href="${u}"><img src="${u}" width="${thumbWidth}" alt="attachment" /></a>\n`;
               }
             }
-            res = http_json(url, headers, payload)
-            return res["candidates"][0]["content"]["parts"][0]["text"]
 
-          reply = None
-          err_openai = None
+            const footer = `\n\n---\n\nbot: OpenAI`;
 
-          try:
-            reply = call_openai()
-          except Exception as e:
-            err_openai = str(e)
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number,
+              body: `${content}${preview}${footer}`
+            });
 
-          if reply is None:
-            try:
-              reply = call_gemini()
-            except Exception as e:
-              print("OpenAI failed:", err_openai)
-              print("Gemini failed:", str(e))
-              sys.exit(1)
+  approve:
+    if: github.event_name == 'issue_comment' && contains(github.event.comment.body, '/approve')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark as approved (label + comment)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.payload.issue.number;
 
-          final_body = reply.strip() + img_preview_md
+            // Label the issue
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number,
+              labels: ["approved"]
+            });
 
-          # Post comment to GitHub
-          api_url = f"https://api.github.com/repos/{REPO}/issues/{ISSUE_NUMBER}/comments"
-          headers = {
-            "Authorization": f"token {GITHUB_TOKEN}",
-            "Accept": "application/vnd.github+json",
-            "Content-Type": "application/json",
-            "User-Agent": "issue-llm-bot"
-          }
-          payload = {"body": final_body}
-
-          try:
-            res = http_json(api_url, headers, payload)
-            print("Comment posted:", res.get("html_url", ""))
-          except HTTPError as e:
-            print("GitHub API HTTPError:", e.code, e.read().decode("utf-8", errors="ignore"))
-            sys.exit(1)
-          except URLError as e:
-            print("GitHub API URLError:", str(e))
-            sys.exit(1)
-
-          PY
+            // Post acknowledgement
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number,
+              body: [
+                "承認（/approve）を受け取りました。",
+                "次：Rexへ投げる段取りに進めます（転送の自動化はこの次の改善で入れます）。"
+              ].join("\n")
+            });
