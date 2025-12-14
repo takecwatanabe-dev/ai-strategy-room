@@ -3,141 +3,126 @@ name: Issue LLM Bot
 on:
   issues:
     types: [opened, reopened]
+  issue_comment:
+    types: [created]
 
 permissions:
   issues: write
 
 jobs:
   reply:
-    if: startsWith(github.event.issue.title, '[TASK]')
+    if: github.event_name == 'issues' && startsWith(github.event.issue.title, '[TASK]')
     runs-on: ubuntu-latest
     steps:
-      - name: Generate reply (OpenAI -> fallback Gemini) and comment
+      - name: Generate & post reply (with image thumbnails)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENAI_MODEL: gpt-4o-mini
-          GEMINI_MODEL: gemini-1.5-flash
-          ISSUE_ACTION: ${{ github.event.action }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
-          ISSUE_URL: ${{ github.event.issue.html_url }}
-          REPO: ${{ github.repository }}
-          BUILD_ID: 2025-12-14_0100_autofit-img-v1_1_0
         run: |
-          set -e
           python3 - <<'PY'
-          import os, json, re
-          import urllib.request
-          from urllib.error import HTTPError, URLError
+          import os, re, json, urllib.request
 
-          # -----------------------------
-          # Metadata
-          # -----------------------------
-          BUILD_ID = os.getenv("BUILD_ID", "build_unknown")
-          issue_action = (os.getenv("ISSUE_ACTION") or "").strip()
-          issue_number = int(os.getenv("ISSUE_NUMBER", "0"))
-          title = (os.getenv("ISSUE_TITLE") or "").strip()
-          body = (os.getenv("ISSUE_BODY") or "").strip()
-          repo = (os.getenv("REPO") or "").strip()
-          issue_url = (os.getenv("ISSUE_URL") or "").strip()
-
-          gh_token = (os.getenv("GITHUB_TOKEN") or "").strip()
-          openai_key = (os.getenv("OPENAI_API_KEY") or "").strip()
-          gemini_key = (os.getenv("GEMINI_API_KEY") or "").strip()
-          openai_model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
-          gemini_model = (os.getenv("GEMINI_MODEL") or "gemini-1.5-flash").strip()
-
-          # -----------------------------
-          # Helpers
-          # -----------------------------
-          def gh_api_request(method: str, path: str, payload: dict | None = None):
-              if not gh_token:
-                  raise RuntimeError("GITHUB_TOKEN is missing.")
-              url = f"https://api.github.com{path}"
-              data = None
-              headers = {
-                  "Authorization": f"Bearer {gh_token}",
-                  "Accept": "application/vnd.github+json",
-                  "User-Agent": "issue-llm-bot",
-              }
-              if payload is not None:
-                  data = json.dumps(payload).encode("utf-8")
-                  headers["Content-Type"] = "application/json"
-              req = urllib.request.Request(url, data=data, headers=headers, method=method)
-              with urllib.request.urlopen(req, timeout=30) as res:
-                  return res.read().decode("utf-8")
-
-          def post_issue_comment(comment_body: str):
-              path = f"/repos/{repo}/issues/{issue_number}/comments"
-              gh_api_request("POST", path, {"body": comment_body})
-
-          def patch_issue_body(new_body: str):
-              path = f"/repos/{repo}/issues/{issue_number}"
-              gh_api_request("PATCH", path, {"body": new_body})
-
-          def extract_image_urls(text: str):
+          def extract_images(text: str):
+              text = text or ""
               urls = []
-
-              # HTML img src
-              for m in re.finditer(r'<img[^>]+src="([^"]+)"', text, flags=re.IGNORECASE):
-                  urls.append(m.group(1).strip())
-
-              # Markdown image ![]()
-              for m in re.finditer(r'!\[[^\]]*\]\(([^)]+)\)', text):
-                  urls.append(m.group(1).strip())
-
-              # Plain GitHub attachments
-              for m in re.finditer(r'(https://github\.com/user-attachments/assets/[A-Za-z0-9\-]+)', text):
-                  urls.append(m.group(1).strip())
-
-              # Dedup (keep order)
-              out = []
+              # HTML <img ... src="...">
+              for m in re.finditer(r'<img[^>]*src="([^"]+)"[^>]*>', text, flags=re.I):
+                  urls.append(m.group(1))
+              # Markdown ![alt](url)
+              for m in re.finditer(r'!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)', text):
+                  urls.append(m.group(1))
+              # de-dup keep order
+              seen, out = set(), []
               for u in urls:
-                  if u and u not in out:
+                  if u not in seen:
+                      seen.add(u)
                       out.append(u)
               return out
 
-          def rebuild_img_tag(url: str, alt: str, width: int):
-              safe_alt = (alt or "image").replace('"', "'")
-              return f'<img src="{url}" width="{width}" alt="{safe_alt}">'
+          def build_thumbs(urls, width=520):
+              if not urls:
+                  return ""
+              lines = []
+              lines.append("")
+              lines.append("### 添付画像（クリックで原寸）")
+              for u in urls:
+                  u2 = u.replace('"', '%22')
+                  lines.append(f'<a href="{u2}"><img src="{u2}" width="{width}"></a>')
+              return "\n".join(lines)
 
-          def autofit_images_in_issue_body(text: str, width: int = 900):
-              """
-              Convert any <img ...> tags to a normalized width, remove height.
-              """
-              changed = False
+          def post_comment(repo, issue_number, token, body):
+              api = f"https://api.github.com/repos/{repo}/issues/{issue_number}/comments"
+              req = urllib.request.Request(
+                  api,
+                  data=json.dumps({"body": body}).encode("utf-8"),
+                  headers={
+                      "Content-Type": "application/json",
+                      "Authorization": f"token {token}",
+                      "Accept": "application/vnd.github+json",
+                  },
+                  method="POST",
+              )
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  r.read()
 
-              def repl(m):
-                  nonlocal changed
-                  tag = m.group(0)
-                  src_m = re.search(r'src="([^"]+)"', tag, flags=re.IGNORECASE)
-                  alt_m = re.search(r'alt="([^"]*)"', tag, flags=re.IGNORECASE)
-                  if not src_m:
-                      return tag
-                  src = src_m.group(1).strip()
-                  alt = (alt_m.group(1).strip() if alt_m else "image")
-                  changed = True
-                  return rebuild_img_tag(src, alt, width)
+          def call_openai(prompt: str) -> str:
+              key = (os.getenv("OPENAI_API_KEY") or "").strip()
+              if not key:
+                  raise RuntimeError("OPENAI_API_KEY missing")
+              url = "https://api.openai.com/v1/chat/completions"
+              payload = {
+                  "model": "gpt-4o-mini",
+                  "messages": [{"role": "user", "content": prompt}],
+                  "temperature": 0.4,
+                  "max_tokens": 520,
+              }
+              req = urllib.request.Request(
+                  url,
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+                  method="POST",
+              )
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  data = json.loads(r.read().decode("utf-8"))
+              return data["choices"][0]["message"]["content"].strip()
 
-              new_text = re.sub(r'<img\b[^>]*>', repl, text, flags=re.IGNORECASE)
-              return new_text, changed
+          def call_gemini(prompt: str) -> str:
+              key = (os.getenv("GEMINI_API_KEY") or "").strip()
+              if not key:
+                  raise RuntimeError("GEMINI_API_KEY missing")
+              url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
+              payload = {
+                  "contents": [{"parts": [{"text": prompt}]}],
+                  "generationConfig": {"temperature": 0.4, "maxOutputTokens": 520},
+              }
+              req = urllib.request.Request(
+                  url,
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers={"Content-Type": "application/json"},
+                  method="POST",
+              )
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  data = json.loads(r.read().decode("utf-8"))
+              return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-          def build_llm_input(title: str, body: str):
-              imgs = extract_image_urls(body)
+          repo = os.getenv("REPO")
+          issue_number = os.getenv("ISSUE_NUMBER")
+          gh_token = os.getenv("GITHUB_TOKEN")
+          title = (os.getenv("ISSUE_TITLE") or "").strip()
+          body = (os.getenv("ISSUE_BODY") or "").strip()
 
-              # Clean heavy img tags / markdown images for the LLM input
-              cleaned = re.sub(r'<img\b[^>]*>', '[画像]', body, flags=re.IGNORECASE)
-              cleaned = re.sub(r'!\[[^\]]*\]\([^)]+\)', '[画像]', cleaned)
+          img_urls = extract_images(body)
+          thumbs = build_thumbs(img_urls, width=520)
 
-              if imgs:
-                  cleaned += "\n\n---\n画像URL一覧:\n" + "\n".join([f"- 画像{i+1}: {u}" for i, u in enumerate(imgs)])
+          prompt = f"""あなたは「AI戦略会議室」の補助AIです。
+ユーザーはコピペ量を減らしたいので、短く・実行しやすく書いてください。
 
-              prompt = f"""あなたはプロジェクト補助AIです。ユーザーは「コピペ量を減らす」ことを重視しています。
-以下のIssue内容から、必ず次の形式で「日本語Markdown」で返してください（短く・実行しやすく）:
-
+必ず次の形式で日本語Markdownで返してください:
 1) 要旨（1〜2行）
 2) 次の1アクション（クリック/入力まで具体）
 3) うまくいかない時の分岐（A/Bで2つまで）
@@ -147,57 +132,57 @@ jobs:
 {title}
 
 --- Issue Body ---
-{cleaned}
+{body}
 """
-              return prompt, imgs
 
-          def call_openai(prompt: str):
-              if not openai_key:
-                  raise RuntimeError("OPENAI_API_KEY is missing.")
-              url = "https://api.openai.com/v1/chat/completions"
-              payload = {
-                  "model": openai_model,
-                  "messages": [
-                      {"role": "system", "content": "You are a concise Japanese project assistant."},
-                      {"role": "user", "content": prompt},
-                  ],
-                  "temperature": 0.2,
-              }
-              data = json.dumps(payload).encode("utf-8")
-              headers = {
-                  "Authorization": f"Bearer {openai_key}",
-                  "Content-Type": "application/json",
-              }
-              req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-              with urllib.request.urlopen(req, timeout=45) as res:
-                  obj = json.loads(res.read().decode("utf-8"))
-              return obj["choices"][0]["message"]["content"].strip()
-
-          def call_gemini(prompt: str):
-              if not gemini_key:
-                  raise RuntimeError("GEMINI_API_KEY is missing.")
-              url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={gemini_key}"
-              payload = {
-                  "contents": [{"parts": [{"text": prompt}]}],
-                  "generationConfig": {"temperature": 0.2},
-              }
-              data = json.dumps(payload).encode("utf-8")
-              headers = {"Content-Type": "application/json"}
-              req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-              with urllib.request.urlopen(req, timeout=45) as res:
-                  obj = json.loads(res.read().decode("utf-8"))
-              cands = obj.get("candidates") or []
-              if not cands:
-                  raise RuntimeError("Gemini returned no candidates.")
-              parts = cands[0].get("content", {}).get("parts", [])
-              text = "".join([p.get("text", "") for p in parts]).strip()
-              if not text:
-                  raise RuntimeError("Gemini returned empty text.")
-              return text
-
-          # -----------------------------
-          # 1) Auto-fit images in issue body (only when opened)
-          # -----------------------------
+          bot = ""
           try:
-              if issue_action == "opened" and body:
-                  new_body, changed = autofit_images_in_issue_body
+              reply = call_openai(prompt)
+              bot = "OpenAI"
+          except Exception:
+              try:
+                  reply = call_gemini(prompt)
+                  bot = "Gemini"
+              except Exception as e:
+                  reply = "1) 要旨\nAPI呼び出しに失敗しました。\n\n2) 次の1アクション\nSecrets（OPENAI_API_KEY / GEMINI_API_KEY）を確認してください。\n\n3) うまくいかない時の分岐\nA: OPENAIだけ入れる\nB: GEMINIだけ入れる\n\n4) 注意点\n秘密情報は貼らないでください。"
+                  bot = "Error"
+
+          if thumbs:
+              reply = reply + "\n\n---\n" + thumbs
+          reply = reply + f"\n\n---\n_bot: {bot}_"
+
+          post_comment(repo, issue_number, gh_token, reply)
+          print("OK")
+          PY
+
+  approve:
+    if: github.event_name == 'issue_comment' && contains(github.event.comment.body, '/approve') && startsWith(github.event.issue.title, '[TASK]')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Acknowledge approval
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          python3 - <<'PY'
+          import os, json, urllib.request
+          repo = os.getenv("REPO")
+          issue = os.getenv("ISSUE_NUMBER")
+          tok = os.getenv("GITHUB_TOKEN")
+          body = "了解。/approve を受け取りました。次は Rex にこのIssueのURLを渡して実装依頼してね（必要なら、私が依頼文も整えるよ）。"
+          api = f"https://api.github.com/repos/{repo}/issues/{issue}/comments"
+          req = urllib.request.Request(
+              api,
+              data=json.dumps({"body": body}).encode("utf-8"),
+              headers={
+                  "Content-Type":"application/json",
+                  "Authorization": f"token {tok}",
+                  "Accept":"application/vnd.github+json",
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(req, timeout=60) as r:
+              r.read()
+          print("approved-commented")
+          PY
