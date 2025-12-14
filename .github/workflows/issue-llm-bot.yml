@@ -1,16 +1,8 @@
-# ISSUE LLM BOT WORKFLOW
-# Version: v0.2.0
-# Build: 2025-12-14 16:08 JST
-# Changes:
-# - Fix env mapping: OPENAI_API_KEY <- secrets.PENAI_API_KEY (fallback to OPENAI_API_KEY if exists)
-# - Use Responses API (/v1/responses)
-# - Attachment preview: <details> with thumbnail in <summary> (no new tab)
-
 name: Issue LLM Bot
 
 on:
   issues:
-    types: [opened, reopened]
+    types: [opened, reopened, edited]
   issue_comment:
     types: [created]
 
@@ -18,177 +10,288 @@ permissions:
   contents: read
   issues: write
 
-jobs:
-  task_auto_reply:
-    if: >-
-      (github.event_name == 'issues' && startsWith(github.event.issue.title, '[TASK]')) ||
-      (github.event_name == 'issue_comment' && startsWith(github.event.issue.title, '[TASK]') && contains(github.event.comment.body, '/approve'))
-    runs-on: ubuntu-latest
+concurrency:
+  group: issue-llm-bot-${{ github.event.issue.number || github.event.comment.issue_url }}
+  cancel-in-progress: true
 
+jobs:
+  auto_reply_task:
+    name: Auto reply (TASK)
+    if: github.event_name == 'issues' && startsWith(github.event.issue.title, '[TASK]')
+    runs-on: ubuntu-latest
     steps:
       - name: Post auto reply (TASK)
         uses: actions/github-script@v7
         env:
-          # 既存運用（PENAI_API_KEY）を優先。無い場合は OPENAI_API_KEY を見る。
-          OPENAI_API_KEY: ${{ secrets.PENAI_API_KEY || secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: gpt-5
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-4.1-mini
         with:
           script: |
             const issue = context.payload.issue;
             const owner = context.repo.owner;
-            const repo = context.repo.repo;
+            const repo  = context.repo.repo;
 
-            const apiKey = process.env.OPENAI_API_KEY;
-            const model = process.env.OPENAI_MODEL || "gpt-5";
+            const bodyText = (issue.body || "").trim();
+            const apiKey = (process.env.OPENAI_API_KEY || "").trim();
+            const model  = (process.env.OPENAI_MODEL || "gpt-4.1-mini").trim();
 
-            // --- helpers ---
             function extractImageUrls(text) {
               const urls = new Set();
-              if (!text) return [];
-              // Markdown: ![alt](URL)
-              const md = /!\[[^\]]*?\]\((https?:\/\/[^\s)]+)\)/g;
-              // HTML: <img ... src="URL" ...>
-              const html = /<img[^>]+src="(https?:\/\/[^">]+)"/g;
 
+              // Markdown: ![alt](url)
+              const mdRe = /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
               let m;
-              while ((m = md.exec(text)) !== null) urls.add(m[1]);
-              while ((m = html.exec(text)) !== null) urls.add(m[1]);
+              while ((m = mdRe.exec(text)) !== null) urls.add(m[1]);
+
+              // HTML: <img ... src="url" ...>
+              const htmlRe = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi;
+              while ((m = htmlRe.exec(text)) !== null) urls.add(m[1]);
+
+              // Raw URL lines (attachments)
+              const rawRe = /(https?:\/\/[^\s)]+(?:png|jpg|jpeg|gif|webp))/gi;
+              while ((m = rawRe.exec(text)) !== null) urls.add(m[1]);
 
               return Array.from(urls);
             }
 
-            function buildImagePreviewBlock(urls) {
-              if (!urls || urls.length === 0) return "";
-              const blocks = urls.map((u, idx) => {
-                // summary内にサムネを置く（クリックで開閉・別タブ回避）
+            function buildImageDetails(urls) {
+              if (!urls.length) return "";
+              const blocks = urls.map((url, i) => {
+                const n = i + 1;
                 return [
                   `<details>`,
-                  `  <summary>🖼 添付画像${idx + 1}（クリックで開く／もう一度で閉じる） <img src="${u}" width="220" alt="thumb"></summary>`,
-                  `  <p><img src="${u}" width="900" alt="full"></p>`,
+                  `  <summary>🖼 添付画像 ${n}（クリックで開く／もう一度で閉じる）</summary>`,
+                  `  <p><img src="${url}" width="260" alt="thumb-${n}"></p>`,
+                  `  <p><img src="${url}" width="900" alt="full-${n}"></p>`,
                   `</details>`
                 ].join("\n");
               });
-              return `### 添付画像（プレビュー）\n\n${blocks.join("\n\n")}\n`;
+              return `\n\n---\n\n## 添付画像（プレビュー）\n\n` + blocks.join("\n\n");
             }
 
-            async function callOpenAI({ prompt }) {
+            function nowJst() {
+              const d = new Date();
+              // GitHub runner is UTC; convert display to JST (+9)
+              const j = new Date(d.getTime() + 9 * 60 * 60 * 1000);
+              const pad = (x) => String(x).padStart(2, "0");
+              return `${j.getUTCFullYear()}-${pad(j.getUTCMonth()+1)}-${pad(j.getUTCDate())} ${pad(j.getUTCHours())}:${pad(j.getUTCMinutes())} JST`;
+            }
+
+            const imageUrls = extractImageUrls(bodyText);
+            const imageSection = buildImageDetails(imageUrls);
+
+            // If key is missing, post a friendly but clear error (no PENAI_* mention)
+            if (!apiKey) {
+              const msg = [
+                `## Bot返信（TASK）`,
+                ``,
+                `要旨`,
+                `- Bot側でAI呼び出しに失敗しました（Secrets未設定）`,
+                ``,
+                `次の1アクション（1つだけ）`,
+                `- GitHub → Settings → Secrets and variables → Actions → Repository secrets に **OPENAI_API_KEY** があるか確認`,
+                ``,
+                `手順（Step 1→）`,
+                `Step 1：Repository secrets に **OPENAI_API_KEY** を追加（または更新）`,
+                ``,
+                `（内部エラー）OPENAI_API_KEY is missing`,
+                ``,
+                `---`,
+                `build: ${nowJst()}`
+              ].join("\n");
+              await github.rest.issues.createComment({
+                owner, repo,
+                issue_number: issue.number,
+                body: msg + imageSection
+              });
+              return;
+            }
+
+            async function callOpenAI(prompt) {
               const res = await fetch("https://api.openai.com/v1/responses", {
                 method: "POST",
                 headers: {
-                  "Content-Type": "application/json",
-                  "Authorization": `Bearer ${apiKey}`
+                  "Authorization": `Bearer ${apiKey}`,
+                  "Content-Type": "application/json"
                 },
                 body: JSON.stringify({
                   model,
-                  input: prompt
+                  input: [
+                    {
+                      role: "user",
+                      content: [
+                        { type: "input_text", text: prompt }
+                      ]
+                    }
+                  ]
                 })
               });
 
-              const json = await res.json();
-
+              const txt = await res.text();
               if (!res.ok) {
-                const msg = json?.error?.message || JSON.stringify(json);
-                throw new Error(msg);
+                throw new Error(`OpenAI HTTP ${res.status}: ${txt.slice(0, 500)}`);
               }
+              const data = JSON.parse(txt);
+              // Prefer output_text if available
+              const out = (data.output_text || "").trim();
+              if (out) return out;
 
-              // できるだけ頑丈に取り出す
-              if (typeof json.output_text === "string" && json.output_text.trim()) return json.output_text.trim();
-
-              // fallback: output[] から text を集める
-              const out = [];
-              const arr = Array.isArray(json.output) ? json.output : [];
-              for (const item of arr) {
-                const content = item?.content;
-                if (!Array.isArray(content)) continue;
-                for (const c of content) {
-                  if (c?.type === "output_text" && typeof c?.text === "string") out.push(c.text);
+              // Fallback: try to reconstruct
+              try {
+                const parts = [];
+                for (const o of (data.output || [])) {
+                  for (const c of (o.content || [])) {
+                    if (c.type === "output_text" && c.text) parts.push(c.text);
+                  }
                 }
+                return parts.join("\n").trim();
+              } catch {
+                return "";
               }
-              return out.join("\n").trim() || "(空の応答でした)";
             }
 
-            // --- main ---
-            const body = issue?.body || "";
-            const title = issue?.title || "";
-            const imageUrls = extractImageUrls(body);
+            const prompt = [
+              `あなたはGitHub Issueの受付係です。日本語で、短く、実務的に返してください。`,
+              `次の構成で出力：`,
+              `- 要旨（1〜2行）`,
+              `- 次の1アクション（1つだけ）`,
+              `- 手順（Step 1→）を最大3ステップ`,
+              `- うまくいかない時（1〜2行）`,
+              `- 注意点（箇条書き2つまで）`,
+              ``,
+              `前提：画像は本文に貼られているが、AIは画像内容を直接読めない可能性がある。画像がある場合は「画像のどこを見てほしいか」を1行だけ追加質問してよい。`,
+              ``,
+              `Issueタイトル：${issue.title}`,
+              `Issue本文：`,
+              `${bodyText || "（本文なし）"}`
+            ].join("\n");
 
-            // APIキー未設定なら、その場でコメントして止める
+            let aiReply = "";
+            try {
+              aiReply = await callOpenAI(prompt);
+            } catch (e) {
+              aiReply = [
+                `## Bot返信（TASK）`,
+                ``,
+                `要旨`,
+                `- Bot側でAI呼び出しに失敗しました。`,
+                ``,
+                `次の1アクション（1つだけ）`,
+                `- Actions の該当Run → Logs を開き、いちばん下の赤い行をこのIssueに貼ってください。`,
+                ``,
+                `（内部エラー）${String(e.message || e)}`
+              ].join("\n");
+            }
+
+            const finalBody = [
+              `## Bot返信（TASK）`,
+              ``,
+              aiReply,
+              ``,
+              `---`,
+              `build: ${nowJst()}`
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner, repo,
+              issue_number: issue.number,
+              body: finalBody + imageSection
+            });
+
+  approve_task:
+    name: Approve (TASK)
+    if: github.event_name == 'issue_comment'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Handle /approve
+        uses: actions/github-script@v7
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-4.1-mini
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+
+            const comment = context.payload.comment;
+            const issue   = context.payload.issue;
+
+            // avoid loops
+            const login = (comment.user && comment.user.login) ? comment.user.login : "";
+            if (login.includes("github-actions")) return;
+
+            const text = (comment.body || "").trim();
+            if (!text.includes("/approve")) return;
+            if (!issue || !issue.title || !issue.title.startsWith("[TASK]")) return;
+
+            const apiKey = (process.env.OPENAI_API_KEY || "").trim();
+            const model  = (process.env.OPENAI_MODEL || "gpt-4.1-mini").trim();
+
+            function nowJst() {
+              const d = new Date();
+              const j = new Date(d.getTime() + 9 * 60 * 60 * 1000);
+              const pad = (x) => String(x).padStart(2, "0");
+              return `${j.getUTCFullYear()}-${pad(j.getUTCMonth()+1)}-${pad(j.getUTCDate())} ${pad(j.getUTCHours())}:${pad(j.getUTCMinutes())} JST`;
+            }
+
             if (!apiKey) {
               const msg = [
-                "## Bot返信（TASK）",
-                "",
-                "（内部エラー）OPENAI_API_KEY が見つかりません（Secrets 未設定）",
-                "",
-                "### 次の1アクション（1つだけ）",
-                "Repository の **Settings → Secrets and variables → Actions** を開き、",
-                "Secrets に **PENAI_API_KEY**（または OPENAI_API_KEY） が入っているか確認してください。",
-                "",
-                "※キー本体はIssue本文やコメントに貼らないでください。"
+                `## 承認（/approve）`,
+                ``,
+                `承認は受け取りました。`,
+                `ただし Bot側のAI呼び出しができません（Secrets未設定）。`,
+                ``,
+                `（内部エラー）OPENAI_API_KEY is missing`,
+                ``,
+                `---`,
+                `build: ${nowJst()}`
               ].join("\n");
               await github.rest.issues.createComment({ owner, repo, issue_number: issue.number, body: msg });
               return;
             }
 
-            const prompt = [
-              "あなたは『AI戦略会議室』のIssueを整理するアシスタントです。",
-              "日本語で、短く、実務的に出力してください。",
-              "",
-              "出力フォーマット：",
-              "## Bot返信（TASK）",
-              "",
-              "### 要旨",
-              "（2〜4行）",
-              "",
-              "### 次の1アクション（1つだけ）",
-              "（ユーザーが今すぐやる1手だけ）",
-              "",
-              "### 手順（Step 1→）",
-              "Step 1: ...",
-              "Step 2: ...",
-              "",
-              "### うまくいかない時",
-              "（よくある原因を2〜4個）",
-              "",
-              "### 注意点",
-              "（APIキーは貼らない、など）",
-              "",
-              "入力（Issue）：",
-              `タイトル: ${title}`,
-              "本文:",
-              body
-            ].join("\n");
-
-            let replyText;
-            try {
-              replyText = await callOpenAI({ prompt });
-            } catch (e) {
-              replyText = [
-                "## Bot返信（TASK）",
-                "",
-                "### 要旨",
-                "Bot側でAI呼び出しに失敗しました。",
-                "",
-                "### 次の1アクション（1つだけ）",
-                "Actions の実行ログを開いて、赤いエラー行（いちばん下）をこのIssueに貼ってください。",
-                "",
-                "### 手順（Step 1→）",
-                "Step 1: Actions → 該当Run → Logs を開く",
-                "Step 2: いちばん下の赤い行をコピーして、このIssueに貼る",
-                "",
-                "### うまくいかない時",
-                "- Secrets名の不一致（PENAI_API_KEY / OPENAI_API_KEY）",
-                "- モデル名が無効",
-                "- OpenAI側の一時エラー",
-                "",
-                "### 注意点",
-                "- APIキー本体は貼らない"
-              ].join("\n");
+            async function callOpenAI(prompt) {
+              const res = await fetch("https://api.openai.com/v1/responses", {
+                method: "POST",
+                headers: {
+                  "Authorization": `Bearer ${apiKey}`,
+                  "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                  model,
+                  input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }]
+                })
+              });
+              const txt = await res.text();
+              if (!res.ok) throw new Error(`OpenAI HTTP ${res.status}: ${txt.slice(0, 500)}`);
+              const data = JSON.parse(txt);
+              return (data.output_text || "").trim();
             }
 
-            const preview = buildImagePreviewBlock(imageUrls);
-            const tail = "\n---\n\n承認して次へ進めるときは、コメント欄に `/approve` と書いてください。\n";
+            const prompt = [
+              `あなたはGitHub Issueの進行係です。日本語で短く返してください。`,
+              `このIssueを「次に進める」ための、1つだけの次アクションを提案してください。`,
+              `必要なら、確認質問は1つだけ。`,
+              ``,
+              `Issueタイトル：${issue.title}`,
+              `Issue本文：`,
+              `${(issue.body || "").trim() || "（本文なし）"}`
+            ].join("\n");
 
-            await github.rest.issues.createComment({
-              owner, repo, issue_number: issue.number,
-              body: replyText + "\n\n" + preview + tail
-            });
+            let out = "";
+            try {
+              out = await callOpenAI(prompt);
+            } catch (e) {
+              out = `（内部エラー）${String(e.message || e)}`;
+            }
+
+            const msg = [
+              `## 承認（/approve）`,
+              ``,
+              out || `次に進めます。まず「目的（1行）」だけコメントでください。`,
+              ``,
+              `---`,
+              `build: ${nowJst()}`
+            ].join("\n");
+
+            await github.rest.issues.createComment({ owner, repo, issue_number: issue.number, body: msg });
