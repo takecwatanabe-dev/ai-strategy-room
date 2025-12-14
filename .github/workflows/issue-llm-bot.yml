@@ -1,25 +1,27 @@
-# Issue LLM Bot (TASK)
-# VERSION: v1.2.1
-# BUILD(JST): 2025-12-14 18:37
+# ISSUE LLM BOT — v1.2.2
+# DATE(JST): 2025-12-14 19:17
+# TITLE: Thumbify images in issue body + fix OpenAI content types
 # CHANGES:
-#  - Secrets参照を OPENAI_API_KEY のみに統一（PENAI_* は完全撤去）
-#  - OpenAI Responses API の content type を input_text / input_image に修正（400: invalid value 'text' を解消）
-#  - 画像は「サムネを常時表示」＋「<details>で拡大」に統一
-#  - Issue本文内の巨大画像（![](...)）も自動でサムネ＋拡大に置換（読みにくさ対策）
+#  - Use only OPENAI_API_KEY (no PENAI_*)
+#  - Auto-convert images in ISSUE BODY to thumbnail + details (md/img/raw url)
+#  - Also run on "edited" (body change) but without posting a new bot reply
+#  - Fix OpenAI Responses API content types: input_text / input_image
+# BUILD PARAM: ?b=2025-12-14_1917_thumb-body-r2
+# DEBUG: &debug=1 (optional)
 
 name: Issue LLM Bot
 
 on:
   issues:
-    types: [opened, reopened]
+    types: [opened, reopened, edited]
 
 permissions:
-  issues: write
   contents: read
+  issues: write
 
 jobs:
-  task_auto_reply:
-    if: startsWith(github.event.issue.title, '[TASK]')
+  llm_task:
+    if: github.event_name == 'issues' && startsWith(github.event.issue.title, '[TASK]')
     runs-on: ubuntu-latest
     steps:
       - name: Post auto reply (TASK)
@@ -27,219 +29,243 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: gpt-5-mini
-          BOT_VERSION: v1.2.1
-          BOT_BUILD: 2025-12-14_1837_thumb-details-r2
         with:
           script: |
             const issue = context.payload.issue;
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
+            const action = context.payload.action;
 
-            const BUILD = process.env.BOT_BUILD || "unknown_build";
-            const VERSION = process.env.BOT_VERSION || "unknown_version";
+            const apiKey = process.env.OPENAI_API_KEY || "";
+            const model = process.env.OPENAI_MODEL || "gpt-5-mini";
 
-            function extractImageUrls(text) {
-              if (!text) return [];
-              const urls = new Set();
-
-              // Markdown image: ![alt](url)
-              const mdImg = /!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/g;
-              let m;
-              while ((m = mdImg.exec(text)) !== null) urls.add(m[1]);
-
-              // HTML img: <img src="...">
-              const htmlImg = /<img[^>]+src=["']([^"']+)["']/gi;
-              while ((m = htmlImg.exec(text)) !== null) urls.add(m[1]);
-
-              return Array.from(urls);
+            function uniq(arr) {
+              return [...new Set(arr.filter(Boolean))];
             }
 
-            function stripImages(text) {
-              if (!text) return "";
-              // remove markdown images
-              let t = text.replace(/!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/g, "");
-              // keep html but remove img tags
-              t = t.replace(/<img[^>]*>/gi, "");
-              return t.trim();
+            function collectImageUrls(text) {
+              const urls = [];
+
+              // Markdown images: ![alt](url "title")
+              const mdRe = /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+              for (const m of text.matchAll(mdRe)) urls.push(m[1]);
+
+              // HTML <img src="...">
+              const imgRe = /<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi;
+              for (const m of text.matchAll(imgRe)) urls.push(m[1]);
+
+              // Bare URLs (common GitHub image hosts)
+              const bareLineRe = /(^|\n)\s*(https?:\/\/(?:private-user-images\.githubusercontent\.com|user-images\.githubusercontent\.com|github\.com\/user-attachments\/assets)\/[^\s<>()]+)\s*(?=\n|$)/gi;
+              for (const m of text.matchAll(bareLineRe)) urls.push(m[2]);
+
+              return uniq(urls);
             }
 
-            function thumbBlock(url, i) {
-              const n = i + 1;
+            function thumbBlock(url, idx) {
               const safeUrl = String(url).replace(/"/g, "&quot;");
+              const n = String(idx + 1).padStart(2, "0");
+
+              // Thumbnail always visible + details for full size
               return [
-                `<img src="${safeUrl}" width="360" />`,
-                ``,
+                `<!-- NL_THUMBIFIED:${n} -->`,
+                `<div>`,
+                `<div><b>画像${n}</b>（サムネ）</div>`,
+                `<img data-nl-thumb="1" src="${safeUrl}" width="360" alt="image ${n}" />`,
                 `<details>`,
-                `<summary>大きく表示（画像${n}）</summary>`,
-                ``,
-                `<img src="${safeUrl}" />`,
-                `</details>`
+                `<summary>大きめ表示（クリックで開く／もう一度で閉じる）</summary>`,
+                `<img data-nl-thumb="1" src="${safeUrl}" alt="image ${n} full" />`,
+                `</details>`,
+                `</div>`
               ].join("\n");
             }
 
-            function transformIssueBodyToThumbs(body) {
-              if (!body) return body;
-              // 二重変換防止
-              if (body.includes("<!-- thumb-details-v1 -->")) return body;
+            function thumbifyIssueBody(text) {
+              if (!text) return { text, changed: false };
 
-              const re = /!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/g;
-              let found = false;
+              let out = text;
+
+              // 1) Markdown images -> thumb block
+              out = out.replace(/!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (m, url) => {
+                // skip if already thumbified nearby (best-effort)
+                if (m.includes("NL_THUMBIFIED")) return m;
+                return `\n${thumbBlock(url, 0)}\n`; // temp idx; will re-index later
+              });
+
+              // 2) HTML <img> (not ours) -> thumb block
+              out = out.replace(/<img\b([^>]*?)\bsrc=["']([^"']+)["']([^>]*?)>/gi, (m, pre, url, post) => {
+                if (m.includes('data-nl-thumb="1"')) return m; // ours
+                return `\n${thumbBlock(url, 0)}\n`;
+              });
+
+              // 3) Bare image URLs on their own line -> thumb block
+              out = out.replace(/(^|\n)\s*(https?:\/\/(?:private-user-images\.githubusercontent\.com|user-images\.githubusercontent\.com|github\.com\/user-attachments\/assets)\/[^\s<>()]+)\s*(?=\n|$)/gi, (m, head, url) => {
+                return `${head}\n${thumbBlock(url, 0)}\n`;
+              });
+
+              // If nothing inserted, done
+              if (!out.includes("NL_THUMBIFIED:")) {
+                return { text, changed: false };
+              }
+
+              // Re-index all thumbified blocks in order (so 01,02,03...)
+              const urls = collectImageUrls(out);
               let idx = 0;
-
-              const replaced = body.replace(re, (_all, url) => {
-                found = true;
+              out = out.replace(/<!-- NL_THUMBIFIED:\d+ -->[\s\S]*?<\/div>/g, () => {
+                const url = urls[idx] || "";
                 const block = thumbBlock(url, idx);
                 idx += 1;
                 return block;
               });
 
-              if (!found) return body;
-              return `<!-- thumb-details-v1 -->\n${replaced}`;
-            }
-
-            function pickOutputText(data) {
-              if (!data) return "";
-              if (typeof data.output_text === "string" && data.output_text.trim()) return data.output_text.trim();
-
-              // Fallback: walk output array
-              const out = [];
-              const arr = Array.isArray(data.output) ? data.output : [];
-              for (const item of arr) {
-                const c = Array.isArray(item.content) ? item.content : [];
-                for (const part of c) {
-                  if (part && typeof part.text === "string") out.push(part.text);
-                  if (part && typeof part.output_text === "string") out.push(part.output_text);
-                }
-              }
-              return out.join("\n").trim();
-            }
-
-            async function callOpenAI({ title, bodyText, imageUrls }) {
-              const apiKey = (process.env.OPENAI_API_KEY || "").trim();
-              if (!apiKey) {
-                throw new Error("OPENAI_API_KEY is missing (Secrets 未設定)");
+              // Add marker to avoid pointless loops
+              if (!out.includes("<!-- NL_BODY_THUMBIFIED -->")) {
+                out = `<!-- NL_BODY_THUMBIFIED -->\n` + out;
               }
 
-              const model = (process.env.OPENAI_MODEL || "gpt-5-mini").trim();
+              return { text: out, changed: out !== text };
+            }
 
-              const content = [];
-              content.push({
-                type: "input_text",
-                text:
-                  [
-                    "あなたはGitHub IssueのTASK受付ボットです。",
-                    "出力は日本語。長文になりすぎないように、要点中心。",
-                    "",
-                    "必ずこの順で書く：",
-                    "1) 要旨（2〜4行）",
-                    "2) 次の1アクション（1つだけ）",
-                    "3) 手順（Step 1→）",
-                    "4) うまくいかない時（短く）",
-                    "5) 注意（APIキー等は貼らない）",
-                    "",
-                    "【Issue情報】",
-                    `タイトル: ${title}`,
-                    "本文:",
-                    bodyText || "(本文なし)",
-                    imageUrls?.length ? `\n添付画像URL数: ${imageUrls.length}` : ""
-                  ].join("\n")
+            async function updateIssueBodyIfNeeded() {
+              const rawBody = issue.body || "";
+              const { text: newBody, changed } = thumbifyIssueBody(rawBody);
+              if (!changed) return { changed: false, error: null };
+
+              try {
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: newBody
+                });
+                return { changed: true, error: null };
+              } catch (e) {
+                return { changed: false, error: String(e?.message || e) };
+              }
+            }
+
+            // ---- If "edited" and body changed: only thumbify body, do NOT post a new bot reply ----
+            if (action === "edited") {
+              const hasBodyChange = !!(context.payload.changes && context.payload.changes.body);
+              if (!hasBodyChange) return;
+
+              await updateIssueBodyIfNeeded();
+              return;
+            }
+
+            // ---- opened / reopened ----
+            const bodyUpdate = await updateIssueBodyIfNeeded();
+
+            const rawBody = issue.body || "";
+            const imageUrls = collectImageUrls(rawBody).slice(0, 6); // limit
+
+            // Build prompt for AI (keep it simple, Japanese)
+            const promptText = [
+              "あなたはGitHub Issueを整理するアシスタントです。",
+              "目的：依頼内容が空でもエラーにせず、次の1アクションだけ提案する。",
+              "条件：",
+              "- 専門用語は避ける（必要なら短い説明を添える）",
+              "- 返信は日本語",
+              "- 画像がある場合：本文の画像はサムネ化済み前提で、確認ポイントを短く聞く",
+              "- 依頼が空（No response等）の場合：『どこを見ればいいか（画面のどの部分か）』を1つだけ質問する",
+              "",
+              "出力は以下の見出しだけ：",
+              "要旨 / 次の1アクション（1つだけ） / 手順（Step 1→） / うまくいかない時 / 注意点",
+              "",
+              "Issue本文：",
+              rawBody
+            ].join("\n");
+
+            // Call OpenAI Responses API
+            if (!apiKey) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: [
+                  "Bot側でAI呼び出しに失敗しました。",
+                  "",
+                  "（内部エラー）OPENAI_API_KEY is missing (Secrets 未設定)",
+                  "",
+                  "※ APIキー本体は貼らないでください。"
+                ].join("\n")
               });
+              return;
+            }
 
-              const maxImages = 4;
-              const imgs = Array.isArray(imageUrls) ? imageUrls.slice(0, maxImages) : [];
-              for (const url of imgs) {
-                content.push({ type: "input_image", image_url: url });
-              }
+            const inputContent = [{ type: "input_text", text: promptText }];
+            for (const url of imageUrls) {
+              inputContent.push({ type: "input_image", image_url: url });
+            }
 
-              const payload = {
-                model,
-                input: [
-                  {
-                    role: "user",
-                    content
-                  }
-                ],
-                max_output_tokens: 900
-              };
+            let aiText = "";
+            let aiErr = "";
 
+            try {
               const res = await fetch("https://api.openai.com/v1/responses", {
                 method: "POST",
                 headers: {
-                  "Authorization": `Bearer ${apiKey}`,
-                  "Content-Type": "application/json"
+                  "Content-Type": "application/json",
+                  "Authorization": `Bearer ${apiKey}`
                 },
-                body: JSON.stringify(payload)
+                body: JSON.stringify({
+                  model,
+                  input: [{ role: "user", content: inputContent }],
+                  temperature: 0.2
+                })
               });
 
-              const data = await res.json().catch(() => ({}));
+              const data = await res.json();
               if (!res.ok) {
-                const msg = data?.error?.message || `${res.status} ${res.statusText}`;
-                throw new Error(`OpenAI API error: ${msg}`);
+                aiErr = `OpenAI API error: ${res.status} ${res.statusText}\n` + JSON.stringify(data, null, 2);
+              } else {
+                aiText = (data.output_text || "").trim();
+                if (!aiText) aiText = "（空の応答でした）";
               }
-
-              return pickOutputText(data) || "（AIの出力が空でした）";
+            } catch (e) {
+              aiErr = String(e?.message || e);
             }
 
-            function buildComment({ aiText, imageUrls }) {
-              const imgs = Array.isArray(imageUrls) ? imageUrls : [];
-              const thumbSection = imgs.length
-                ? [
-                    "## 添付画像（サムネ）",
-                    ...imgs.map((u, i) => thumbBlock(u, i))
-                  ].join("\n\n")
-                : "";
-
+            // Build image preview (thumbnail + details)
+            function buildPreview(urls) {
+              if (!urls.length) return "";
+              const blocks = urls.map((u, i) => thumbBlock(u, i)).join("\n\n");
               return [
-                "## Bot返信（TASK）",
                 "",
-                `build: ${BUILD} / ${VERSION}`,
-                "",
-                aiText,
-                "",
-                thumbSection,
-                "",
-                "承認して次へ進めるときは、コメント欄に **/approve** と書いてください。"
-              ].filter(Boolean).join("\n");
+                "---",
+                "## 添付画像（プレビュー）",
+                blocks
+              ].join("\n");
             }
 
-            // ---- main ----
-            const issueNumber = issue.number;
-            const rawBody = issue.body || "";
-            const imageUrls = extractImageUrls(rawBody);
+            const bodyStatusLine = bodyUpdate.error
+              ? `本文サムネ化：NG（${bodyUpdate.error}）`
+              : (bodyUpdate.changed ? "本文サムネ化：OK" : "本文サムネ化：変更なし");
 
-            // 1) Issue本文の巨大画像をサムネ化（希望仕様）
-            try {
-              const newBody = transformIssueBodyToThumbs(rawBody);
-              if (newBody !== rawBody) {
-                await github.rest.issues.update({
-                  owner,
-                  repo,
-                  issue_number: issueNumber,
-                  body: newBody
-                });
-              }
-            } catch (e) {
-              // 本文変換に失敗しても、BOT返信自体は続行
-            }
+            const commentBody = aiErr
+              ? [
+                  "Bot側でAI呼び出しに失敗しました。",
+                  "",
+                  "```",
+                  aiErr,
+                  "```",
+                  "",
+                  `- ${bodyStatusLine}`,
+                  "",
+                  "承認して次へ進めるときは、コメント欄に `/approve` と書いてください。",
+                  buildPreview(imageUrls)
+                ].join("\n")
+              : [
+                  "## Bot返信（TASK）",
+                  "",
+                  aiText,
+                  "",
+                  `- ${bodyStatusLine}`,
+                  "",
+                  "承認して次へ進めるときは、コメント欄に `/approve` と書いてください。",
+                  buildPreview(imageUrls)
+                ].join("\n");
 
-            // 2) AI呼び出し（失敗してもコメントは必ず出す）
-            let aiText = "";
-            try {
-              const clean = stripImages(rawBody);
-              aiText = await callOpenAI({
-                title: issue.title || "",
-                bodyText: clean.slice(0, 12000),
-                imageUrls
-              });
-            } catch (e) {
-              aiText = `（内部エラー）${e?.message || String(e)}`;
-            }
-
-            // 3) 返信コメント投稿
-            const commentBody = buildComment({ aiText, imageUrls });
             await github.rest.issues.createComment({
-              owner,
-              repo,
-              issue_number: issueNumber,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
               body: commentBody
             });
