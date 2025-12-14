@@ -31,9 +31,9 @@ body:
         〜したい
         〜を確認したい
     validations:
-      required: true
+      required: false
 
-  - type: textarea
+      - type: textarea
     id: images
     attributes:
       label: "画像添付（任意）"
