@@ -1,16 +1,50 @@
-# .github/ISSUE_TEMPLATE/task.yml
+# TASK ISSUE FORM — v0.4.0
+# Build: 2025-12-14 15:00 JST
+# Changes:
+# - YAML破損（Critical）を回避する安全な構造に統一
+# - すべての入力を optional（空欄OK）に固定
+# - 画像貼り付け導線を最上段で明瞭化
+
 name: "TASK（自動返信）"
-description: "Botが『要旨＋次の1アクション』を返します"
+description: "Botが「要旨＋次の1アクション」を返します（画像だけでもOK）"
 title: "[TASK] "
 labels: ["task"]
 
 body:
+  - type: markdown
+    attributes:
+      value: |
+        ### 使い方（最短）
+        - **画像だけでOK**：この下の「画像添付（任意）」に **ドラッグ＆ドロップ** または **貼り付け（Ctrl+V）**
+        - 文章があるなら「依頼内容」に **1行だけ** でもOK
+        - 承認して進めるときは、Issue作成後のコメント欄に **/approve** と書いてください
+
+  - type: textarea
+    id: images
+    attributes:
+      label: "画像添付（任意）"
+      description: "ここにスクショ画像をドラッグ＆ドロップ／貼り付け（Ctrl+V）OK（複数OK）"
+      placeholder: "ここに画像をドロップ（または貼り付け）"
+    validations:
+      required: false
+
   - type: textarea
     id: purpose
     attributes:
       label: "目的（1行）"
       description: "例）コピー量を減らして、次の作業が迷いなく進むようにする"
-      placeholder: "（空欄OK）"
+      placeholder: "目的を1行で"
+    validations:
+      required: false
+
+  - type: textarea
+    id: request
+    attributes:
+      label: "依頼内容（やりたいこと）"
+      description: "箇条書きでOK（空欄でも作成できます）"
+      placeholder: |
+        〜したい
+        〜を確認したい
     validations:
       required: false
 
@@ -22,29 +56,3 @@ body:
       placeholder: "例）Issue返信の形式を固定したい"
     validations:
       required: false
-
-  - type: textarea
-    id: request
-    attributes:
-      label: "依頼内容（やりたいこと）"
-      description: "箇条書きでOK（空欄OK）"
-      placeholder: |
-        - 〜したい
-        - 〜を確認したい
-    validations:
-      required: false
-
-  - type: textarea
-    id: images
-    attributes:
-      label: "画像添付（任意）"
-      description: "この枠にスクショ画像をドラッグ＆ドロップ／貼り付け（Ctrl+V）でOK（複数OK）"
-      placeholder: "ここに画像をドロップ（または貼り付け）"
-    validations:
-      required: false
-
-  - type: markdown
-    attributes:
-      value: |
-        ✅ **承認**：Issue作成後のコメント欄に `/approve` と書く（それでRexへ自動で投げます）  
-        ⚠️ **注意**：APIキーなど秘密情報は貼らないでください
