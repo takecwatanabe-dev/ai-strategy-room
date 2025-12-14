@@ -1,13 +1,19 @@
 <!--
 APP: AI Strategy Room Viewer
-Version: v0.1.0
-Date(JST): 2025-12-14 11:44
-Title: サムネ→ダイアログ＋✕＋hover（枠なし）表示
+Version: v0.1.1
+Date(JST): 2025-12-15 00:29
+Title: 画像重複排除修正（内部実装のみ）
 Changes:
- - Issuesから画像URLを抽出してサムネ表示
- - hoverで枠なしプレビュー（Wikipedia風）
- - クリックで画面内ダイアログ表示（✕で閉じる／Esc対応）
-BuildParam(b): ?b=2025-12-14_1144_viewer-v0.1.0
+ - URL正規化キーで重複排除（表示URLは元のまま保持）
+ - 画像配列をカードごとに1回生成して保持
+ - サムネも拡大も同一配列参照
+ - ?raw=1等のクエリパラメータは表示URLで保持
+ - ?debug=1時にカード内に画像数と正規化キー一覧を表示
+Policy:
+ - UI/文言/配置は一切変更しない（内部実装のみ）
+ - extractImages()はカードごとに1回だけ実行し、同一配列を参照
+ - 正規化は"キー生成のみ"に使い、表示URLは保持
+BuildParam(b): ?b=2025-12-15_0029_imgdedupe-v0.1.1
 DebugParam: &debug=1
 -->
 <!doctype html>
@@ -60,7 +66,7 @@ DebugParam: &debug=1
 <header>
   <div class="row">
     <div class="title">AI戦略会議室ビューア</div>
-    <div class="pill" id="badge">v0.1.0</div>
+    <div class="pill" id="badge">v0.1.1</div>
     <div class="pill" id="repoPill">repo: takecwatanabe-dev/ai-strategy-room</div>
     <div class="pill" id="buildPill">b: -</div>
   </div>
@@ -137,15 +143,68 @@ DebugParam: &debug=1
     msg.innerHTML = html ? `<div class="${isErr?'err':''}">${html}</div>` : "";
   }
 
-  function extractImages(text){
-    const urls = new Set();
-    if(!text) return [];
+  /**
+   * URLを正規化して同一画像判定のキーを生成
+   * - クエリパラメータ（?以降）を除去
+   * - アンカー（#以降）を除去
+   * - パス末尾のサイズ指定（/w=400 など）を除去
+   * 
+   * 注意: 表示URLは元のまま保持（?raw=1等は残す）
+   * この関数は重複判定のキー生成のみに使用
+   */
+  function normalizeImageUrlKey(url) {
+    if (!url || typeof url !== 'string') return '';
+    
+    try {
+      const u = new URL(url);
+      // クエリパラメータを除去（キー生成用）
+      u.search = '';
+      // アンカーを除去
+      u.hash = '';
+      // パス末尾のサイズ指定を除去（例: /w=400, /h=300）
+      u.pathname = u.pathname.replace(/\/[wh]=\d+$/i, '');
+      
+      return u.toString();
+    } catch (e) {
+      // URL解析に失敗した場合は簡易処理
+      return url.split('?')[0].split('#')[0];
+    }
+  }
+
+  /**
+   * Issue本文から画像URLを抽出（重複排除済み）
+   * @param {string} text - Issue本文
+   * @returns {Array<{key: string, url: string}>} 正規化キーと元URLのペア配列（重複なし）
+   */
+  function extractImages(text) {
+    const imageMap = new Map(); // key -> originalUrl のマップ
+    if (!text) return [];
+    
+    // Markdown形式の画像: ![alt](url)
     const md = /!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/g;
+    // HTML形式の画像: <img src="url">
     const html = /<img[^>]+src=["'](https?:\/\/[^"']+)["'][^>]*>/g;
+    
     let m;
-    while((m = md.exec(text)) !== null) urls.add(m[1]);
-    while((m = html.exec(text)) !== null) urls.add(m[1]);
-    return [...urls];
+    // Markdown画像を抽出
+    while ((m = md.exec(text)) !== null) {
+      const originalUrl = m[1];
+      const key = normalizeImageUrlKey(originalUrl);
+      if (key && !imageMap.has(key)) {
+        imageMap.set(key, originalUrl); // 最初に見つかった元URLを保持
+      }
+    }
+    // HTML画像を抽出
+    while ((m = html.exec(text)) !== null) {
+      const originalUrl = m[1];
+      const key = normalizeImageUrlKey(originalUrl);
+      if (key && !imageMap.has(key)) {
+        imageMap.set(key, originalUrl); // 最初に見つかった元URLを保持
+      }
+    }
+    
+    // 配列形式で返す（keyとurlのペア）
+    return Array.from(imageMap.entries()).map(([key, url]) => ({ key, url }));
   }
 
   function clipText(s, n=220){
@@ -221,8 +280,12 @@ DebugParam: &debug=1
         const card = document.createElement("div");
         card.className = "card";
 
-        const imgs = extractImages(it.body);
-        const topImgs = imgs.slice(0, 6);
+        // 【修正】画像配列を1回だけ生成して保持（重複排除済み）
+        const allImages = extractImages(it.body);
+        const topImgs = allImages.slice(0, 6); // サムネ用（先頭6枚）
+
+        // 【修正】カードに画像リストを保存（サムネも拡大も同じ配列を参照）
+        card.dataset.allImages = JSON.stringify(allImages.map(img => img.url));
 
         card.innerHTML = `
           <div class="h">
@@ -245,7 +308,10 @@ DebugParam: &debug=1
 
         if(topImgs.length){
           const thumbs = card.querySelector(".thumbs");
-          topImgs.forEach(url => {
+          
+          // 【修正】サムネ表示（元のURLを使用、?raw=1等は保持）
+          topImgs.forEach(imgObj => {
+            const url = imgObj.url; // 元のURLを表示（?raw=1等は保持）
             const im = document.createElement("img");
             im.className = "thumb";
             im.src = url;
@@ -256,16 +322,37 @@ DebugParam: &debug=1
             im.addEventListener("mousemove", (e)=> showHover(url, e.clientX, e.clientY));
             im.addEventListener("mouseleave", hideHover);
 
-            im.addEventListener("click", ()=> openModal(url));
+            // 【修正】モーダル表示も同じ配列を参照
+            im.addEventListener("click", ()=> {
+              // カードに保存された全画像配列を取得
+              const allUrls = JSON.parse(card.dataset.allImages || "[]");
+              // クリックされた画像のインデックスを取得
+              const currentIndex = topImgs.findIndex(img => img.url === url);
+              // モーダルで表示（同じ配列を参照）
+              if (currentIndex >= 0 && allUrls.length > 0) {
+                openModal(allUrls[currentIndex]);
+              } else {
+                openModal(url);
+              }
+            });
+            
             thumbs.appendChild(im);
           });
+          
+          // 【デバッグ用】?debug=1 の場合はカード内に画像数と正規化キー一覧を表示
+          if (debug) {
+            const debugDiv = document.createElement("div");
+            debugDiv.style.cssText = "margin-top:8px; padding:8px; font-size:11px; color:var(--muted); font-family:monospace; background:rgba(255,255,255,.03); border-radius:6px; border:1px solid var(--line);";
+            const keysList = allImages.map(img => img.key).join(", ");
+            debugDiv.innerHTML = `<strong style="color:#aab6c6;">[DEBUG]</strong> 画像: <strong>${allImages.length}枚</strong> (重複排除済み)<br>正規化キー: <span style="word-break:break-all;">${keysList || "(なし)"}</span>`;
+            card.querySelector(".body").after(debugDiv);
+          }
         }
 
         list.appendChild(card);
       });
 
       status.textContent = `${filtered.length}件`;
-      if(debug) console.log({api: api.toString(), count: filtered.length});
 
     }catch(err){
       setMsg(String(err && err.message ? err.message : err), true);
@@ -294,3 +381,4 @@ DebugParam: &debug=1
 </script>
 </body>
 </html>
+
