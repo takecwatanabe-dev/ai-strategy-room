@@ -1,7 +1,8 @@
+# .github/ISSUE_TEMPLATE/task.yml
 name: "TASK（自動返信）"
-description: "Botが要旨と次の1アクションを返します"
-labels: ["task"]
+description: "Botが「要旨＋次の1アクション」を返します"
 title: "[TASK] "
+labels: ["task"]
 body:
   - type: textarea
     id: purpose
@@ -13,12 +14,11 @@ body:
       required: true
 
   - type: textarea
-    id: background
+    id: context
     attributes:
       label: "背景／状況（必要なら）"
       description: "前提・制約・いま困っていること（短く）"
       placeholder: "例）Issue返信の形式を固定したい"
-      render: markdown
     validations:
       required: false
 
@@ -26,17 +26,18 @@ body:
     id: request
     attributes:
       label: "依頼内容（やりたいこと）"
-      description: "箇条書きでOK"
-      placeholder: "- 〜したい\n- 〜を確認したい"
-      render: markdown
+      description: "箇条書きでOK（※画像がある場合は次の『画像添付（任意）』へ）"
+      placeholder: |
+        〜したい
+        〜を確認したい
     validations:
-      required: false
+      required: true
 
   - type: textarea
     id: images
     attributes:
       label: "画像添付（任意）"
-      description: "ここにスクショ画像をドラッグ＆ドロップ、または貼り付けしてOK（無理ならIssue作成後のコメント欄に添付でOK）"
+      description: "ここにスクショ画像をドラッグ＆ドロップ／貼り付け（Ctrl+V）でOK（複数OK）"
       placeholder: "ここに画像をドロップ（または貼り付け）"
       render: markdown
     validations:
@@ -45,9 +46,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        **注意：APIキーなど秘密情報は貼らないでください。**
-  - type: markdown
-    attributes:
-      value: |
-        ✅ 承認は「Issue作成後のコメント欄」に **/approve** と書いてください（それでRexへ自動で投げます）。
-※ 画像はここに貼り付け → 右上の「Preview」で確認（別タブで開きたくない時は本文中の画像はクリックしない）
+        ---
+        ### 注意
+        - 秘密情報（APIキー等）は絶対に貼らないでください。
+        - 画像は本文に貼られている前提でOK（解析は不要）。
+        - 承認は「Issue作成後のコメント欄」に `/approve` と書いてください（それでRexへ投げます）。
