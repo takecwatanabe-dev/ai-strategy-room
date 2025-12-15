@@ -60,23 +60,19 @@ jobs:
             }
 
             function thumbBlock(url, idx) {
-              const safeUrl = String(url).replace(/"/g, "&quot;");
-              const n = String(idx + 1).padStart(2, "0");
+  const safeUrl = String(url).replace(/"/g, "&quot;");
+  const n = String(idx + 1).padStart(2, "0");
 
-              // Thumbnail always visible + details for full size
-              return [
-                `<!-- NL_THUMBIFIED:${n} -->`,
-                `<div>`,
-                `<div><b>画像${n}</b>（サムネ）</div>`,
-                `<img data-nl-thumb="1" src="${safeUrl}" width="360" alt="image ${n}" />`,
-                `<details>`,
-                `<summary>大きめ表示（クリックで開く／もう一度で閉じる）</summary>`,
-                `<img data-nl-thumb="1" src="${safeUrl}" alt="image ${n} full" />`,
-                `</details>`,
-                `</div>`
-              ].join("\n");
-            }
-
+  // GitHub側で“別タブに飛ぶ”のを避けたいので、
+  // <details>/<summary>で同ページ内の拡大表示にする
+  return [
+    `<!-- _NL_THUMBIFIED_${n} -->`,
+    `<details>`,
+    `<summary><b>画像${n}</b>（クリックで拡大／もう一度で閉じる）<br><img data-nl-thumb="1" src="${safeUrl}" width="360" alt="image ${n} thumb" /></summary>`,
+    `<img data-nl-thumb="1" src="${safeUrl}" alt="image ${n} full" />`,
+    `</details>`
+  ].join("\n");
+}
             function thumbifyIssueBody(text) {
               if (!text) return { text, changed: false };
 
