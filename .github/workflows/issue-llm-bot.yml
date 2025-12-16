@@ -1,12 +1,12 @@
 # ==============================================================
 # AI戦略会議室｜Issue LLM Bot
-# Version: v1.0.3
-# Date: 2025-12-16 11:35 JST
+# Version: v1.0.4
+# Date: 2025-12-16 11:49 JST
 # Changes:
-# - YAML構文エラー（line 50付近のインデント崩れ）を根治：プロンプト生成をheredoc＋ファイル化
-# - /approve または /check のコメント時だけ動く（無関係コメントでは動かない）
-# - OpenAI Responses API：output_text / output[].content[].text(type=output_text) の両対応で本文抽出
-# - 添付画像URLを最大4枚まで <details> でプレビュー表示
+# - YAML構文崩れ（L57付近）を根治：イベント読み取り/プロンプト生成をPythonに集約
+# - /approve または /check のコメント時だけ返信（それ以外のコメントは成功終了でスキップ）
+# - OpenAI Responses API の本文抽出を堅牢化（output_text or output[].content[].text）
+# - 添付画像URLを最大4枚まで <details> で自動プレビュー付与
 # ==============================================================
 
 name: Issue LLM Bot
@@ -21,17 +21,12 @@ permissions:
   contents: read
   issues: write
 
-concurrency:
-  group: issue-llm-bot-${{ github.event.issue.number }}
-  cancel-in-progress: true
-
 jobs:
   bot:
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'issues' || (github.event_name == 'issue_comment' && (contains(github.event.comment.body, '/approve') || contains(github.event.comment.body, '/check'))) }}
 
     steps:
-      - name: Ensure jq is available
+      - name: Install jq
         shell: bash
         run: |
           set -euo pipefail
@@ -40,51 +35,99 @@ jobs:
             sudo apt-get install -y jq
           fi
 
-      - name: Build prompt
+      - name: Build prompt from event
+        id: ctx
         shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          ISSUE_URL: ${{ github.event.issue.html_url }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
-          COMMENT_BODY: ${{ github.event_name == 'issue_comment' && github.event.comment.body || '' }}
         run: |
           set -euo pipefail
+          python - <<'PY'
+          import json, os, re, textwrap
 
-          # --- 基本指示（固定） ---
-          cat > prompt.txt <<'EOF'
-あなたは「戦略的会議室」の議事進行AIです。
-次のIssue/コメントを読み、以下の形式で日本語で返信してください。
+          event_path = os.environ.get("GITHUB_EVENT_PATH")
+          event_name = os.environ.get("GITHUB_EVENT_NAME", "")
 
-【出力形式】
-1) 要旨（1〜2行）
-2) 次の1アクション（クリック/入力まで具体）
-3) 添付画像（プレビュー）: 画像があれば <details> で折りたたみ表示（最大4枚）
+          with open(event_path, "r", encoding="utf-8") as f:
+            e = json.load(f)
 
-【注意】
-- 余計な前置きは不要
-- 安全上の配慮が必要な内容は注意喚起する
-EOF
+          issue = e.get("issue") or {}
+          comment_obj = e.get("comment") or {}
 
-          # --- 入力（Issue/コメント） ---
-          {
-            echo ""
-            echo "----"
-            echo "Issue URL: ${ISSUE_URL}"
-            echo "Issue #: ${ISSUE_NUMBER}"
-            echo "Title: ${ISSUE_TITLE}"
-            echo ""
-            echo "Body:"
-            echo "${ISSUE_BODY}"
-            if [ "${EVENT_NAME}" = "issue_comment" ] && [ -n "${COMMENT_BODY}" ]; then
-              echo ""
-              echo "Comment:"
-              echo "${COMMENT_BODY}"
-            fi
-          } >> prompt.txt
+          issue_number = issue.get("number") or ""
+          issue_title  = issue.get("title") or ""
+          issue_body   = issue.get("body") or ""
+          comment_body = comment_obj.get("body") or ""
+
+          # /approve または /check のときだけ動く（それ以外はスキップ）
+          should_run = True
+          if event_name == "issue_comment":
+            if ("/approve" not in comment_body) and ("/check" not in comment_body):
+              should_run = False
+
+          # 画像URL（最大4）
+          text_all = (issue_body or "") + "\n" + (comment_body or "")
+          urls = re.findall(r'https?://[^\s)"]+', text_all)
+          img_urls = []
+          for u in urls:
+            if ("user-images.githubusercontent.com" in u) or ("/assets/" in u and "github.com/" in u) or ("githubusercontent.com" in u and "user-attachments" in u):
+              img_urls.append(u)
+          img_urls = img_urls[:4]
+
+          base = """あなたは「戦略的会議室」の議事進行AIです。
+          次のIssue/コメントを読み、必ず【出力形式】だけで日本語で返信してください。
+
+          【出力形式】
+          1) 要旨（1〜2行）
+          2) 次の1アクション（クリック/入力まで具体）
+
+          【注意】
+          - 余計な前置きは不要
+          - 画像プレビューはシステム側で付けるので、本文に画像URLは貼らない
+          """
+
+          context = f"""---- INPUT ----
+          Event: {event_name}
+          Issue #: {issue_number}
+          Title:
+          {issue_title}
+
+          Body:
+          {issue_body}
+          """
+
+          if event_name == "issue_comment":
+            context += f"""
+
+          Comment:
+          {comment_body}
+          """
+
+          prompt = textwrap.dedent(base).strip() + "\n\n" + textwrap.dedent(context).strip() + "\n"
+
+          with open("prompt.txt", "w", encoding="utf-8") as f:
+            f.write(prompt)
+
+          with open("images.txt", "w", encoding="utf-8") as f:
+            for u in img_urls:
+              f.write(u + "\n")
+
+          # GitHub Outputs
+          out_path = os.environ.get("GITHUB_OUTPUT")
+          def out(k, v):
+            with open(out_path, "a", encoding="utf-8") as o:
+              o.write(f"{k}={v}\n")
+
+          out("issue_number", str(issue_number))
+          out("should_run", "true" if should_run else "false")
+          PY
+
+      - name: Skip (no command)
+        if: ${{ steps.ctx.outputs.should_run != 'true' }}
+        shell: bash
+        run: |
+          echo "Skip: comment does not include /approve or /check"
 
       - name: Call OpenAI (Responses API)
+        if: ${{ steps.ctx.outputs.should_run == 'true' }}
         id: llm
         shell: bash
         env:
@@ -99,69 +142,4 @@ EOF
             -H "Content-Type: application/json" \
             -d "{
               \"model\": \"gpt-4o\",
-              \"input\": ${PROMPT_JSON}
-            }")
-
-          # 本文抽出（.output_text があれば優先、なければ output[] から連結）
-          AI_TEXT=$(echo "$OPENAI_JSON" | jq -r '
-            (.output_text // ([.output[]?
-              | select(.type=="message")
-              | .content[]?
-              | select(.type=="output_text")
-              | .text] | join("\n")))
-          ' || true)
-
-          if [ -z "$AI_TEXT" ] || [ "$AI_TEXT" = "null" ]; then
-            ERR=$(echo "$OPENAI_JSON" | jq -r '.error.message // empty' || true)
-            echo "::error::OpenAI response parsing failed"
-            echo "RAW: $OPENAI_JSON"
-            if [ -n "$ERR" ]; then
-              AI_TEXT="（Bot側でAI呼び出しに失敗しました）\n\n原因: ${ERR}\n\n次の1アクション: Actionsのログ（Generate/Call OpenAI部分）を開いて、エラー行を貼ってください。"
-            else
-              AI_TEXT="（Bot側でAI呼び出しに失敗しました）\n\n次の1アクション: Actionsのログを開いて、RAW出力（Response: ...）を貼ってください。"
-            fi
-          fi
-
-          # 添付画像URL抽出（最大4）
-          IMG_URLS=$(grep -oE 'https://[^ )"]+' prompt.txt \
-            | grep -E 'github\.com/.*/assets|user-images\.githubusercontent\.com|githubusercontent\.com' \
-            | head -n 4 || true)
-
-          if [ -n "$IMG_URLS" ]; then
-            AI_TEXT="${AI_TEXT}
-
----
-
-## 添付画像（プレビュー）
-<details><summary>画像を開く（最大4枚）</summary>
-
-"
-            while IFS= read -r url; do
-              [ -z "$url" ] && continue
-              AI_TEXT="${AI_TEXT}![](${url})
-
-"
-            done <<< "$IMG_URLS"
-            AI_TEXT="${AI_TEXT}</details>"
-          fi
-
-          echo "ai_text<<EOF" >> "$GITHUB_OUTPUT"
-          printf "%s\n" "$AI_TEXT" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
-      - name: Post comment to Issue
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          AI_TEXT: ${{ steps.llm.outputs.ai_text }}
-        run: |
-          set -euo pipefail
-          COMMENT_JSON=$(printf "%s" "$AI_TEXT" | jq -Rs .)
-
-          curl -sS -X POST \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${REPO}/issues/${ISSUE_NUMBER}/comments" \
-            -d "{\"body\": ${COMMENT_JSON} }" >/dev/null
+              \"input\":
