@@ -1,13 +1,14 @@
 # ==============================================================
 # AI戦略会議室｜Rex Dispatch Workflow
-# Version: v1.0.1
-# Date: 2025-12-16 11:11 JST
-# 修正内容:
-# - YAML構文エラー（line 141付近）修正
-# - context_textブロックを安全なPython文法で再構成
+# Version: v1.0.2
+# Date: 2025-12-16 11:18 JST
+# Changes:
+# - Generate Rex Instruction の run を python heredoc で実行（bash誤解釈を解消）
+# - context_text は安全な文字列連結形式（YAML崩れ防止）
 # ==============================================================
 
 name: Rex Dispatch
+
 on:
   workflow_dispatch:
   push:
@@ -17,6 +18,7 @@ on:
 jobs:
   run-dispatch:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -24,27 +26,34 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install requests PyYAML
 
       - name: Generate Rex Instruction
         id: generate
         run: |
-          import os, textwrap, json
+          python - <<'PY'
+          import os, textwrap
 
-          def shorten(text, length=1200):
+          def shorten(text, max_len=1200):
               s = str(text or "")
-              return (s[:length] + "…(略)") if len(s) > length else s
+              s = s.strip()
+              return s[:max_len] + "…(省略)" if len(s) > max_len else s
 
-          issue_url = os.getenv("GITHUB_SERVER_URL") + "/" + os.getenv("GITHUB_REPOSITORY") + "/issues/" + os.getenv("GITHUB_REF_NAME", "main")
+          # ここは「とにかく動く」ための最小構成（後でIssue/コメント取得を載せられる）
+          repo = os.getenv("GITHUB_REPOSITORY", "")
+          server = os.getenv("GITHUB_SERVER_URL", "https://github.com")
+          ref = os.getenv("GITHUB_REF_NAME", "main")
+
+          issue_url = f"{server}/{repo}"
           issue_title = "AI会議室ディスパッチ"
           issue_body = "会議ログの内容を取得中です。"
           comments = [{"user": "system", "body": "コメントテスト"}]
 
-          # --- ここが今回修正箇所 ---
           context_text = (
               "【元Issue】\n"
               f"URL: {issue_url}\n"
@@ -53,12 +62,12 @@ jobs:
               f"{issue_body}\n\n"
               "【直近コメント（最大12件）】\n"
               + "\n\n".join([f"- {x['user']}:\n{shorten(x['body'], 1200)}" for x in comments])
+              + f"\n\n(Ref: {ref})\n"
           )
-          # -----------------------------
 
           prompt = textwrap.dedent(f"""
           あなたは「戦略的会議室」の実装担当です。
-          次のIssue情報をもとに、Rex（実装担当）が作業できる「実装指示書」を日本語Markdownで出力してください。
+          次の情報をもとに、Rex（実装担当）が作業できる「実装指示書」を日本語Markdownで作ってください。
 
           出力形式（Markdown）:
           1. 目的（1〜2行）
@@ -69,10 +78,11 @@ jobs:
 
           --- 入力 ---
           {context_text}
-          """)
+          """).strip() + "\n"
 
           with open("rex_prompt.txt", "w", encoding="utf-8") as f:
               f.write(prompt)
+          PY
 
       - name: Upload result
         uses: actions/upload-artifact@v4
