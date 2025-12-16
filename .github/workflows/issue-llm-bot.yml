@@ -1,10 +1,3 @@
-# Issue LLM Bot — v0.2.0-img-preview-02
-# Build(JST): 2025-12-16 16:24
-# Policy:
-#  - 画像プレビューは「/check または /approve の“そのコメント”に画像がある時だけ」
-#  - Issue本文・過去コメントの画像は拾わない
-#  - 画像は <details>/<summary> で折りたたみ、枚数表示＋画像間に空行を入れる
-
 name: Issue LLM Bot
 
 on:
@@ -22,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Prepare Context (decide reply + extract images from current comment only)
+      - name: Prepare Context (decide reply + extract images from CURRENT comment only)
         id: ctx
         env:
           GITHUB_EVENT_PATH: ${{ github.event_path }}
@@ -34,9 +27,46 @@ jobs:
           def b64(s: str) -> str:
             return base64.b64encode((s or "").encode("utf-8")).decode("ascii")
 
+          def startswith_task(title: str) -> bool:
+            t = (title or "").strip()
+            return t.startswith("[TASK]") or t.startswith("【TASK】") or t.lower().startswith("[task]")
+
+          def extract_images_from_text(text: str):
+            t = text or ""
+            urls = []
+
+            # 1) Markdown image: ![alt](url)
+            for m in re.finditer(r"!\[[^\]]*\]\((https?://[^)\s]+)\)", t, flags=re.IGNORECASE):
+              urls.append(m.group(1))
+
+            # 2) <img src="...">
+            for m in re.finditer(r"<img[^>]+src=[\"'](https?://[^\"'>\s]+)[\"'][^>]*>", t, flags=re.IGNORECASE):
+              urls.append(m.group(1))
+
+            # 3) Bare URLs (GitHub attachments / user-images / private-user-images / github.com/assets)
+            patterns = [
+              r"(https?://github\.com/user-attachments/assets/[^\s)]+)",
+              r"(https?://user-images\.githubusercontent\.com/[^\s)]+)",
+              r"(https?://private-user-images\.githubusercontent\.com/[^\s)]+)",
+              r"(https?://github\.com/[^\s)]+/assets/[^\s)]+)",
+              r"(https?://[^)\s]+?\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s)]*)?)",
+            ]
+            for p in patterns:
+              for m in re.finditer(p, t, flags=re.IGNORECASE):
+                urls.append(m.group(1))
+
+            # dedupe preserve order
+            seen = set()
+            out = []
+            for u in urls:
+              u = (u or "").strip().rstrip(").,")
+              if u and u not in seen:
+                seen.add(u)
+                out.append(u)
+            return out
+
           event_name = os.environ.get("GITHUB_EVENT_NAME", "")
-          path = os.environ["GITHUB_EVENT_PATH"]
-          with open(path, "r", encoding="utf-8") as f:
+          with open(os.environ["GITHUB_EVENT_PATH"], "r", encoding="utf-8") as f:
             ev = json.load(f)
 
           issue = ev.get("issue") or {}
@@ -44,10 +74,199 @@ jobs:
           issue_title = issue.get("title") or ""
           issue_body = issue.get("body") or ""
 
-          comment_body = ""
+          comment = ev.get("comment") or {}
+          comment_body = comment.get("body") or ""
+          comment_author = (comment.get("user") or {}).get("login") or ""
+
           command = ""
           should_reply = False
 
           if event_name == "issues":
-            # [TASK] で始まるIssueのみ自動返信（必要ならここを緩めてOK）
-            t = (issue_title or
+            # [TASK] のみ自動返信
+            should_reply = startswith_task(issue_title)
+          elif event_name == "issue_comment":
+            first = (comment_body.strip().splitlines()[0] if comment_body.strip() else "").strip()
+            if first.startswith("/check"):
+              command = "/check"
+              should_reply = True
+            elif first.startswith("/approve"):
+              command = "/approve"
+              should_reply = True
+
+          # ★画像は「issue_comment かつ /check or /approve の“そのコメント本文”だけ」から抽出
+          image_urls = []
+          if event_name == "issue_comment" and should_reply and command in ("/check", "/approve"):
+            image_urls = extract_images_from_text(comment_body)
+
+          # outputs
+          gh_out = os.environ["GITHUB_OUTPUT"]
+          with open(gh_out, "a", encoding="utf-8") as w:
+            w.write(f"should_reply={'true' if should_reply else 'false'}\n")
+            w.write(f"event_name={event_name}\n")
+            w.write(f"command={command}\n")
+            w.write(f"issue_number={issue_number}\n")
+            w.write(f"issue_title_b64={b64(issue_title)}\n")
+            w.write(f"issue_body_b64={b64(issue_body)}\n")
+            w.write(f"comment_body_b64={b64(comment_body)}\n")
+            w.write(f"comment_author={comment_author}\n")
+            w.write(f"image_count={len(image_urls)}\n")
+            w.write("image_urls<<'EOF'\n")
+            for u in image_urls:
+              w.write(u + "\n")
+            w.write("EOF\n")
+          PY
+
+      - name: Generate Bot Response (OpenAI)
+        id: gen
+        if: steps.ctx.outputs.should_reply == 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python3 - <<'PY'
+          import os, json, base64, urllib.request
+
+          def ub64(s: str) -> str:
+            return base64.b64decode((s or "").encode("ascii")).decode("utf-8", errors="replace")
+
+          issue_title = ub64(os.environ.get("ISSUE_TITLE_B64",""))
+          issue_body  = ub64(os.environ.get("ISSUE_BODY_B64",""))
+          comment_body= ub64(os.environ.get("COMMENT_BODY_B64",""))
+          command     = os.environ.get("COMMAND","")
+          event_name  = os.environ.get("EVENT_NAME","")
+          issue_number= os.environ.get("ISSUE_NUMBER","")
+
+          if event_name == "issue_comment":
+            prompt = f"""あなたはGitHub Issue LLM Botです。必ず日本語で、次の形式で短く書いてください。
+
+1. 要旨（1〜2行）
+2. 次の1アクション（クリック/入力まで具体）
+3. 受け入れ条件（箇条書き）
+4. 注意点（箇条書き）
+
+【Issue #{issue_number}】{issue_title}
+
+--- Issue本文 ---
+{issue_body}
+
+--- コメント ---
+{comment_body}
+"""
+          else:
+            prompt = f"""あなたはGitHub Issue LLM Botです。必ず日本語で、次の形式で短く書いてください。
+
+1. 要旨（1〜2行）
+2. 次の1アクション（クリック/入力まで具体）
+3. 受け入れ条件（箇条書き）
+4. 注意点（箇条書き）
+
+【Issue #{issue_number}】{issue_title}
+
+--- Issue本文 ---
+{issue_body}
+"""
+
+          # Chat Completions
+          url = "https://api.openai.com/v1/chat/completions"
+          payload = {
+            "model": "gpt-4o-mini",
+            "messages": [
+              {"role":"system","content":"あなたは実務に強い日本語アシスタントです。"},
+              {"role":"user","content": prompt}
+            ],
+            "temperature": 0.2
+          }
+
+          req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+              "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
+              "Content-Type": "application/json"
+            },
+            method="POST"
+          )
+          with urllib.request.urlopen(req, timeout=60) as r:
+            data = json.loads(r.read().decode("utf-8"))
+
+          text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+
+          # write multiline output
+          out = os.environ["GITHUB_OUTPUT"]
+          with open(out, "a", encoding="utf-8") as w:
+            w.write("bot_text<<'EOF'\n")
+            w.write(text + "\n")
+            w.write("EOF\n")
+          PY
+        env:
+          ISSUE_TITLE_B64: ${{ steps.ctx.outputs.issue_title_b64 }}
+          ISSUE_BODY_B64: ${{ steps.ctx.outputs.issue_body_b64 }}
+          COMMENT_BODY_B64: ${{ steps.ctx.outputs.comment_body_b64 }}
+          COMMAND: ${{ steps.ctx.outputs.command }}
+          EVENT_NAME: ${{ steps.ctx.outputs.event_name }}
+          ISSUE_NUMBER: ${{ steps.ctx.outputs.issue_number }}
+
+      - name: Build Image Preview Block (only when images exist)
+        id: img
+        if: steps.ctx.outputs.should_reply == 'true'
+        run: |
+          COUNT="${{ steps.ctx.outputs.image_count }}"
+          PREVIEW=""
+          if [ "$COUNT" != "0" ]; then
+            PREVIEW="<details><summary>📷 添付画像（${COUNT}枚）</summary>\n\n"
+            IDX=0
+            while IFS= read -r URL; do
+              [ -z "$URL" ] && continue
+              IDX=$((IDX+1))
+              if [ "$IDX" -gt 1 ]; then
+                PREVIEW="${PREVIEW}\n"
+              fi
+              PREVIEW="${PREVIEW}![](${URL})\n\n"
+            done <<'EOF'
+          ${{ steps.ctx.outputs.image_urls }}
+          EOF
+            PREVIEW="${PREVIEW}</details>\n"
+          fi
+
+          {
+            echo "image_preview<<'EOF'"
+            printf "%b" "$PREVIEW"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post Comment to Issue
+        if: steps.ctx.outputs.should_reply == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ steps.ctx.outputs.issue_number }}
+          BOT_TEXT: ${{ steps.gen.outputs.bot_text }}
+          IMAGE_PREVIEW: ${{ steps.img.outputs.image_preview }}
+        run: |
+          python3 - <<'PY'
+          import os, json, urllib.request
+
+          repo = os.environ["REPO"]
+          issue_number = os.environ["ISSUE_NUMBER"]
+          bot_text = (os.environ.get("BOT_TEXT") or "").strip()
+          image_preview = (os.environ.get("IMAGE_PREVIEW") or "").strip()
+
+          body = bot_text
+          if image_preview:
+            body = (body + "\n\n" + image_preview).strip()
+
+          api = f"https://api.github.com/repos/{repo}/issues/{issue_number}/comments"
+          payload = json.dumps({"body": body}).encode("utf-8")
+
+          req = urllib.request.Request(
+            api,
+            data=payload,
+            headers={
+              "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+              "Accept": "application/vnd.github+json",
+              "Content-Type": "application/json"
+            },
+            method="POST"
+          )
+          with urllib.request.urlopen(req, timeout=60) as r:
+            _ = r.read()
+          PY
