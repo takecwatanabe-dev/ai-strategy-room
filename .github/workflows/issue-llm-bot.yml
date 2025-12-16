@@ -1,165 +1,306 @@
-# ================================================================
-# AI戦略会議室 | Issue LLM Bot
-# Version: v1.0.6
-# Date: 2025-12-16 13:20 JST
-# Changes:
-#  - /approve または /check コメントに画像がある場合のみプレビュー生成
-#  - 画像が無い場合はプレビュー全体を出力しない（スキップ）
-#  - 過去Issue本文や過去コメントの画像は一切参照しない（完全独立）
-# ================================================================
-
 name: Issue LLM Bot
 
 on:
   issues:
-    types: [opened, reopened]
+    types: [opened, edited]
   issue_comment:
     types: [created]
 
-permissions:
-  contents: read
-  issues: write
-
 jobs:
-  bot:
+  llm_task:
     runs-on: ubuntu-latest
-
+    if: |
+      (github.event_name == 'issues' && github.event.issue.user.type != 'Bot') ||
+      (github.event_name == 'issue_comment' && 
+       github.event.comment.user.type != 'Bot' && 
+       github.event.actor != 'github-actions[bot]' &&
+       (contains(github.event.comment.body, '/approve') || 
+        contains(github.event.comment.body, '/review') ||
+        contains(github.event.comment.body, '/check')))
+    outputs:
+      check_result: ${{ steps.check.outputs.check_result }}
+      should_run: ${{ steps.check_image.outputs.should_run || 'false' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          python-version: "3.11"
+          node-version: '20'
 
-      - name: Build prompt & selective preview (Python)
-        id: build
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
-          COMMENT_BODY: ${{ github.event.comment.body }}
+      - name: Install jq
         run: |
-          python - <<'PY'
-          import os, re, json
-          from pathlib import Path
+          sudo apt-get update
+          sudo apt-get install -y jq
 
-          Path(".tmp").mkdir(parents=True, exist_ok=True)
+      - name: Check Image in Comment
+        id: check_image
+        run: |
+          SHOULD_RUN="false"
+          
+          # issue_comment イベントで /approve または /check が含まれている場合のみチェック
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            COMMENT_BODY="${{ github.event.comment.body }}"
+            
+            # /approve または /check が含まれているかチェック
+            if echo "$COMMENT_BODY" | grep -qiE '/(approve|check)'; then
+              # コメント本文に画像URLが含まれているかチェック
+              # GitHubの画像URLパターン: user-images.githubusercontent.com または private-user-images.githubusercontent.com
+              if echo "$COMMENT_BODY" | grep -qiE '!\[[^\]]*\]\(https?://[^)]*(user-images|private-user-images)\.githubusercontent\.com[^)]*\)'; then
+                SHOULD_RUN="true"
+                echo "::notice::Image detected in /approve or /check comment, will generate preview"
+              else
+                echo "::notice::No image in /approve or /check comment, text-only response"
+              fi
+            else
+              echo "::notice::Not /approve or /check comment, skipping image check"
+            fi
+          else
+            echo "::notice::Not issue_comment event, skipping image check"
+          fi
+          
+          echo "should_run=${SHOULD_RUN}" >> $GITHUB_OUTPUT
+          echo "should_run=${SHOULD_RUN}"
 
-          event = (os.getenv("EVENT_NAME") or "").strip()
-          issue_number = (os.getenv("ISSUE_NUMBER") or "").strip()
-          title = (os.getenv("ISSUE_TITLE") or "").strip()
-          issue_body = os.getenv("ISSUE_BODY") or ""
-          comment_body = os.getenv("COMMENT_BODY") or ""
+      - name: Generate Bot Response
+        id: generate
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Issue情報を取得（issues イベントと issue_comment イベントの両方に対応）
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            ISSUE_NUMBER="${{ github.event.issue.number }}"
+            ISSUE_TITLE="${{ github.event.issue.title }}"
+            ISSUE_BODY="${{ github.event.issue.body }}"
+            COMMENT_BODY="${{ github.event.comment.body }}"
+            PROMPT_TEXT="Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}
 
-          def has_cmd(s: str) -> bool:
-            return bool(re.search(r'(^|\s)/(approve|check)(\s|$)', s or "", flags=re.IGNORECASE))
+${ISSUE_BODY}
 
-          def extract_images(text: str):
-            urls = []
-            if not text:
-              return []
-            # Markdown ![](URL)
-            urls += re.findall(r'!\[[^\]]*\]\((https?://[^)\s]+)\)', text)
-            # HTML <img src="URL">
-            urls += re.findall(r'<img[^>]+src=["\'](https?://[^"\']+)["\']', text, flags=re.IGNORECASE)
-            # remove duplicates
-            seen, out = set(), []
-            for u in urls:
-              if u not in seen:
-                seen.add(u)
-                out.append(u)
-            return out[:4]
+コメント: ${COMMENT_BODY}
 
-          should_run = False
-          image_urls = []
+上記のIssueとコメントに対して、適切な回答を生成してください。"
+          else
+            ISSUE_NUMBER="${{ github.event.issue.number }}"
+            ISSUE_TITLE="${{ github.event.issue.title }}"
+            ISSUE_BODY="${{ github.event.issue.body }}"
+            PROMPT_TEXT="Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}
 
-          if event == "issue_comment" and has_cmd(comment_body):
-            should_run = True
-            image_urls = extract_images(comment_body)
+${ISSUE_BODY}
 
-          Path(".tmp/image_urls.json").write_text(json.dumps(image_urls, ensure_ascii=False), encoding="utf-8")
+上記のIssueに対して、適切な回答を生成してください。"
+          fi
+          
+          # プロンプトをJSONエスケープ
+          PROMPT_JSON=$(echo "$PROMPT_TEXT" | jq -Rs .)
+          
+          # OpenAI Responses APIを呼び出し
+          OPENAI_JSON=$(curl -s -X POST https://api.openai.com/v1/responses \
+            -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"model\": \"gpt-4o\",
+              \"input\": ${PROMPT_JSON}
+            }")
+          
+          # OpenAI Responses API仕様に合わせて本文を抽出
+          # .output_text が直接存在する場合、または .output[].content[].text(type=output_text) を連結
+          AI_TEXT=$(echo "$OPENAI_JSON" | jq -r '
+            if .output_text then
+              .output_text
+            else
+              ([.output[]? 
+                | select(.type=="message") 
+                | .content[]? 
+                | select(.type=="output_text") 
+                | .text] | join("\n"))
+            end
+          ' || echo "")
+          
+          # エラーチェック
+          if [ -z "$AI_TEXT" ] || [ "$AI_TEXT" = "null" ]; then
+            echo "::error::OpenAI API response parsing failed"
+            echo "Response: $OPENAI_JSON"
+            exit 1
+          fi
+          
+          COMMENT_BODY="$AI_TEXT"
+          
+          echo "commentBody<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMENT_BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
-          # build request JSON
-          prompt = f"""# 要約
-          1) 要旨（1〜2行）
-          2) 次の1アクション（クリック/入力まで具体）
-          3) 受け入れ条件（チェック項目）
-          4) 注意点（秘密情報は書かない）
-
-          # Issue {issue_number}: {title}
-          {issue_body}
-
-          # コメント
-          {comment_body}
-          """
-
-          Path(".tmp/prompt.txt").write_text(prompt, encoding="utf-8")
-
-          Path(os.environ["GITHUB_OUTPUT"]).write_text(f"should_run={'true' if should_run else 'false'}\n", encoding="utf-8")
-          PY
-
-      - name: Skip if not approved
-        if: steps.build.outputs.should_run != 'true'
-        run: echo "Skip (not /approve or /check comment)."
-
-      - name: Call OpenAI Responses API
-        if: steps.build.outputs.should_run == 'true'
+      - name: Generate Image Preview
+        id: image_preview
+        if: steps.check_image.outputs.should_run == 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          set -euo pipefail
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          prompt = Path(".tmp/prompt.txt").read_text(encoding="utf-8")
-          images = json.loads(Path(".tmp/image_urls.json").read_text(encoding="utf-8"))
-          content = [{"type":"input_text","text":prompt}]
-          for u in images:
-            content.append({"type":"input_image","image_url":u})
-          data = {
-            "model":"gpt-4o-mini",
-            "input":[{"role":"user","content":content}],
-            "temperature":0.2
-          }
-          Path(".tmp/request.json").write_text(json.dumps(data,ensure_ascii=False),encoding="utf-8")
-          PY
-
-          curl -sS https://api.openai.com/v1/responses \
+          COMMENT_BODY="${{ github.event.comment.body }}"
+          
+          # コメント本文から画像URLを抽出
+          IMAGE_URLS=$(echo "$COMMENT_BODY" | grep -oE '!\[[^\]]*\]\(https?://[^)]*(user-images|private-user-images)\.githubusercontent\.com[^)]*\)' | grep -oE 'https?://[^)]+')
+          
+          if [ -z "$IMAGE_URLS" ]; then
+            echo "::warning::No image URLs found"
+            echo "preview_text=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # 最初の画像URLを使用
+          FIRST_IMAGE_URL=$(echo "$IMAGE_URLS" | head -n1)
+          echo "::notice::Processing image: ${FIRST_IMAGE_URL}"
+          
+          # OpenAI Vision APIで画像を分析
+          PREVIEW_JSON=$(curl -s -X POST https://api.openai.com/v1/chat/completions \
             -H "Authorization: Bearer ${OPENAI_API_KEY}" \
             -H "Content-Type: application/json" \
-            -d @.tmp/request.json > .tmp/response.json
+            -d "{
+              \"model\": \"gpt-4o\",
+              \"messages\": [
+                {
+                  \"role\": \"user\",
+                  \"content\": [
+                    {
+                      \"type\": \"text\",
+                      \"text\": \"この画像を簡潔に説明してください。技術的な内容や重要な情報があれば含めてください。\"
+                    },
+                    {
+                      \"type\": \"image_url\",
+                      \"image_url\": {
+                        \"url\": \"${FIRST_IMAGE_URL}\"
+                      }
+                    }
+                  ]
+                }
+              ],
+              \"max_tokens\": 300
+            }")
+          
+          # レスポンスからテキストを抽出
+          PREVIEW_TEXT=$(echo "$PREVIEW_JSON" | jq -r '.choices[0].message.content // ""')
+          
+          if [ -z "$PREVIEW_TEXT" ] || [ "$PREVIEW_TEXT" = "null" ]; then
+            echo "::warning::Failed to generate image preview"
+            echo "preview_text=" >> $GITHUB_OUTPUT
+          else
+            echo "::notice::Image preview generated successfully"
+            echo "preview_text<<EOF" >> $GITHUB_OUTPUT
+            echo "## 📷 画像プレビュー" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo "${PREVIEW_TEXT}" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Post comment to Issue
-        if: steps.build.outputs.should_run == 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Self-Check Image Links
+        id: check
         run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
+          COMMENT_BODY="${{ steps.generate.outputs.commentBody }}"
+          
+          # NG条件チェック
+          NG_DETECTED=false
+          CHECK_RESULT="PASS"
+          
+          # NG条件 a: <a タグで画像URLにリンクしている
+          # 画像URLのパターン: private-user-images.githubusercontent.com, user-images.githubusercontent.com など
+          if echo "$COMMENT_BODY" | grep -qiE '<a[^>]*href=["'"'"']?https?://[^"'"'"' ]*(private-user-images|user-images|githubusercontent\.com)'; then
+            NG_DETECTED=true
+            CHECK_RESULT="FAIL"
+            echo "::error::NG detected: <a tag linking to image URL"
+          fi
+          
+          # NG条件 b: Markdown画像リンクが残っている（![ と ]( の組み合わせ）
+          if echo "$COMMENT_BODY" | grep -qE '!\[[^\]]*\]\('; then
+            NG_DETECTED=true
+            CHECK_RESULT="FAIL"
+            echo "::error::NG detected: Markdown image link syntax (![ ... ](...)) found"
+          fi
+          
+          # 自己判定結果を先頭に追加
+          if [ "$NG_DETECTED" = "true" ]; then
+            FINAL_BODY="SELF-CHECK: image_link=YES (FAIL)
 
-          resp = json.loads(Path(".tmp/response.json").read_text(encoding="utf-8"))
-          text = resp.get("output_text")
-          if not text:
-            text = "（Bot）返信本文の抽出に失敗しました。Actionsログを確認してください。"
+$COMMENT_BODY"
+            echo "Self-check result: FAIL"
+          else
+            FINAL_BODY="SELF-CHECK: image_link=NO (PASS)
 
-          images = json.loads(Path(".tmp/image_urls.json").read_text(encoding="utf-8"))
-          preview = ""
-          if images:
-            preview = "\n\n<details>\n<summary>添付画像（プレビュー）</summary>\n\n" + \
-                      "\n".join([f'<img src="{u}" width="720">' for u in images]) + \
-                      "\n\n</details>\n"
+$COMMENT_BODY"
+            echo "Self-check result: PASS"
+          fi
+          
+          echo "checkResult=$CHECK_RESULT" >> $GITHUB_OUTPUT
+          echo "check_result=$CHECK_RESULT" >> $GITHUB_OUTPUT
+          echo "finalBody<<EOF" >> $GITHUB_OUTPUT
+          echo "$FINAL_BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          # NGならジョブを失敗（core.setFailed相当）
+          if [ "$NG_DETECTED" = "true" ]; then
+            echo "::error::IMAGE_LINK_DETECTED"
+            exit 1
+          fi
 
-          body = text.strip() + preview
+      - name: Post Comment
+        if: steps.check.outputs.checkResult == 'PASS'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // issues イベントと issue_comment イベントの両方に対応
+            const issue_number = context.payload.issue?.number || context.issue?.number;
+            if (issue_number) {
+              let commentBody = `${{ steps.check.outputs.finalBody }}`;
+              
+              // 画像プレビューが生成された場合は追加
+              const previewText = `${{ steps.image_preview.outputs.preview_text }}`;
+              if (previewText && previewText.trim() !== '') {
+                commentBody = previewText + '\n\n---\n\n' + commentBody;
+              }
+              
+              github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue_number,
+                body: commentBody
+              });
+            }
 
-          Path(".tmp/comment.json").write_text(json.dumps({"body":body},ensure_ascii=False),encoding="utf-8")
-          PY
+      - name: Notify Result
+        if: always()
+        run: |
+          echo "::notice::Action run result=${{ job.status }}"
 
-          curl -sS -X POST \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Content-Type: application/json" \
-            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
-            -d @.tmp/comment.json > /dev/null
+  notify:
+    needs: [llm_task]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            // issues イベントと issue_comment イベントの両方に対応
+            const issue_number = context.payload.issue?.number || context.issue?.number;
+            const jobResult = '${{ needs.llm_task.result }}'; // success / failure / cancelled
+            const selfCheck = '${{ needs.llm_task.outputs.check_result }}' || 'UNKNOWN';
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const shouldRun = '${{ needs.llm_task.outputs.should_run }}' || 'false';
+            const body =
+              `🧾 Issue LLM Bot 結果\n` +
+              `- job: ${jobResult}\n` +
+              `- self-check: ${selfCheck}\n` +
+              `- image-preview: ${shouldRun}\n` +
+              `- run: ${runUrl}\n`;
+            if (issue_number) {
+              await github.rest.issues.createComment({ 
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue_number,
+                body: body
+              });
+            }
+
