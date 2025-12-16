@@ -1,302 +1,153 @@
-# ISSUE LLM BOT — v0.1.0-imgdetails-stable-01
-# Build: 2025-12-16 16:20 JST
-# Policy:
-#  - [TASK] Issue: 自動返信（要旨＋次の1アクション）
-#  - /check or /approve コメント: 自動返信
-#  - 画像プレビューは「そのコメントに画像がある時だけ」出す（過去コメント/本文は拾わない）
-#  - <details><summary>📷 添付画像（N枚）</summary> で折りたたみ、画像の間に空行を1つ
+# Issue LLM Bot — v0.1.0
+# Build: 2025-12-16 17:33 JST
+# Changes:
+# - /check /approve コメント「そのコメント内」の画像だけを拾って <details> でプレビュー
+# - 画像0件ならプレビュー枠を出さない
+# - 外部apt/jqなし（失敗しにくい構成）
+# - OPENAI_API_KEY が無い/失敗しても、最低限の返信は返す
 
-name: issue-llm-bot
+name: Issue LLM Bot
 
 on:
   issues:
-    types: [opened, reopened]
+    types: [opened, edited]
   issue_comment:
-    types: [created]
-  workflow_dispatch:
+    types: [created, edited]
 
 permissions:
   contents: read
   issues: write
 
 jobs:
-  llm_task:
+  bot:
     runs-on: ubuntu-latest
+    if: |
+      github.event.sender.type != 'Bot' &&
+      github.actor != 'github-actions[bot]' &&
+      (
+        (github.event_name == 'issues' && startsWith(github.event.issue.title, '[TASK]')) ||
+        (github.event_name == 'issue_comment' && (
+          contains(github.event.comment.body, '/check') ||
+          contains(github.event.comment.body, '/approve') ||
+          contains(github.event.comment.body, '/review')
+        ))
+      )
 
     steps:
-      - name: Load Event Context
-        id: ctx
-        shell: bash
-        run: |
-          set -eu
-
-          EVENT_NAME="${GITHUB_EVENT_NAME}"
-
-          ISSUE_NUMBER="$(jq -r '.issue.number // empty' "$GITHUB_EVENT_PATH")"
-          ISSUE_TITLE="$(jq -r '.issue.title // ""' "$GITHUB_EVENT_PATH")"
-          ISSUE_BODY="$(jq -r '.issue.body // ""' "$GITHUB_EVENT_PATH")"
-          COMMENT_BODY="$(jq -r '.comment.body // ""' "$GITHUB_EVENT_PATH")"
-
-          {
-            echo "EVENT_NAME=$EVENT_NAME"
-            echo "ISSUE_NUMBER=$ISSUE_NUMBER"
-            echo "ISSUE_TITLE<<'EOF'"
-            echo "$ISSUE_TITLE"
-            echo "EOF"
-            echo "ISSUE_BODY<<'EOF'"
-            echo "$ISSUE_BODY"
-            echo "EOF"
-            echo "COMMENT_BODY<<'EOF'"
-            echo "$COMMENT_BODY"
-            echo "EOF"
-          } >> "$GITHUB_ENV"
-
-          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
-
-      - name: Decide Should Reply
-        id: decide
-        shell: bash
-        run: |
-          set -eu
-
-          SHOULD_REPLY="false"
-          COMMAND=""
-
-          if [[ "$EVENT_NAME" == "issues" ]]; then
-            # [TASK] で始まるIssueだけ自動返信
-            if printf "%s" "$ISSUE_TITLE" | grep -Eq '^\[TASK\]'; then
-              SHOULD_REPLY="true"
-              COMMAND="task"
-            fi
-          elif [[ "$EVENT_NAME" == "issue_comment" ]]; then
-            # /check /approve（スラッシュ複数も許容）
-            if printf "%s" "$COMMENT_BODY" | grep -Eq '^\s*/+(check|approve)\b'; then
-              SHOULD_REPLY="true"
-              COMMAND="$(printf "%s" "$COMMENT_BODY" | sed -nE 's/^\s*\/+(check|approve)\b.*/\1/p' | head -n1)"
-            fi
-          fi
-
-          echo "should_reply=$SHOULD_REPLY" >> "$GITHUB_OUTPUT"
-          echo "command=$COMMAND" >> "$GITHUB_OUTPUT"
-
-          echo "::notice::should_reply=$SHOULD_REPLY / command=$COMMAND"
-
-      - name: Extract Images From Current Comment Only
-        id: img
-        if: steps.decide.outputs.should_reply == 'true' && env.EVENT_NAME == 'issue_comment'
-        env:
-          COMMENT_BODY: ${{ env.COMMENT_BODY }}
-        shell: bash
-        run: |
-          set -eu
-
-          python3 - << 'PY'
-          import os, re
-
-          text = os.environ.get("COMMENT_BODY","") or ""
-
-          # 「そのコメント本文」からだけ抽出（過去コメント/Issue本文は見ない）
-          patterns = [
-            r'!\[[^\]]*\]\((https?://[^)]+)\)',
-            r'(https?://github\.com/user-attachments/assets/[^\s)]+)',
-            r'(https?://private-user-images\.githubusercontent\.com/[^\s)]+)',
-            r'(https?://user-images\.githubusercontent\.com/[^\s)]+)',
-            r'(https?://[^ \n)]+?\.(?:png|jpe?g|gif|webp)(?:\?[^ \n)]+)?)',
-          ]
-
-          urls = []
-          seen = set()
-          for p in patterns:
-            for u in re.findall(p, text, flags=re.IGNORECASE):
-              u = (u or "").strip().strip('"').strip("'")
-              if not u:
-                continue
-              if u not in seen:
-                seen.add(u)
-                urls.append(u)
-
-          with open("image_urls.txt","w",encoding="utf-8") as f:
-            for u in urls:
-              f.write(u + "\n")
-
-          print(len(urls))
-          PY
-
-          IMAGE_COUNT="$(wc -l < image_urls.txt | tr -d ' ')"
-          SHOULD_RUN="false"
-          if [[ "${IMAGE_COUNT:-0}" -gt 0 ]]; then SHOULD_RUN="true"; fi
-
-          echo "image_count=$IMAGE_COUNT" >> "$GITHUB_OUTPUT"
-          echo "should_run=$SHOULD_RUN" >> "$GITHUB_OUTPUT"
-
-          echo "::notice::image_count=$IMAGE_COUNT / image-preview=$SHOULD_RUN"
-
-      - name: Build Image Preview Markdown
-        id: preview
-        if: steps.img.outputs.should_run == 'true'
-        shell: bash
-        run: |
-          set -eu
-
-          IMAGE_COUNT="${{ steps.img.outputs.image_count }}"
-
-          {
-            echo "<details><summary>📷 添付画像（${IMAGE_COUNT}枚）</summary>"
-            echo ""
-            i=0
-            while IFS= read -r url; do
-              [[ -z "$url" ]] && continue
-              i=$((i+1))
-              if [[ "$i" -gt 1 ]]; then
-                echo ""   # ← 画像の間に空行1つ
-              fi
-              echo "![](${url})"
-            done < image_urls.txt
-            echo ""
-            echo "</details>"
-          } > image_preview.md
-
-      - name: Generate Bot Text (fallback if no OpenAI key)
-        id: gen
-        if: steps.decide.outputs.should_reply == 'true'
+      - name: Compose & Post Comment
+        uses: actions/github-script@v7
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        shell: bash
-        run: |
-          set -eu
+        with:
+          script: |
+            const isIssue = context.eventName === 'issues';
+            const issue = context.payload.issue;
+            const comment = context.payload.comment;
 
-          COMMAND="${{ steps.decide.outputs.command }}"
+            const issueNumber = issue.number;
+            const issueTitle  = issue.title || '';
+            const issueBody   = issue.body || '';
+            const commentBody = comment?.body || '';
 
-          # まずは安定優先：OpenAIが無くても必ず返信する
-          if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-            {
-              echo "1. 要旨"
-              if [[ "$COMMAND" == "task" ]]; then
-                echo "Issueが [TASK] のため、自動返信しています。"
-              else
-                echo "/$COMMAND を受け取りました。"
-              fi
-              echo ""
-              echo "2. 次の1アクション"
-              echo "Actions の実行ログを開き、直近Runが success になっているか確認してください。"
-              echo ""
-              echo "3. 受け入れ条件"
-              echo "・Botが返信する"
-              echo "・画像がある時だけ「📷 添付画像（N枚）」が出る"
-              echo "・画像の間に空行が入る"
-              echo ""
-              echo "4. 注意点"
-              echo "・YAMLはインデント（行頭の空白）が崩れると動きません（行順より重要）"
-            } > bot_text.md
+            // -----------------------------
+            // 画像抽出（「そのコメント」だけ）
+            // -----------------------------
+            let images = [];
+            if (!isIssue) {
+              // Markdown: ![alt](url)
+              const mdRe = /!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/g;
+              // HTML: <img src="url">
+              const htmlRe = /<img[^>]+src=["'](https?:\/\/[^"']+)["'][^>]*>/gi;
 
-            echo "self_check=PASS" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+              let m;
+              while ((m = mdRe.exec(commentBody)) !== null) images.push(m[1]);
+              while ((m = htmlRe.exec(commentBody)) !== null) images.push(m[1]);
+            }
 
-          # OpenAIあり：本文を少し賢くする（失敗してもfallback）
-          cat > prompt.txt <<'EOF'
-あなたはGitHub Issue運用アシスタントです。必ず日本語で、次の形式で短く書いてください。
+            // 重複排除
+            images = [...new Set(images)];
 
-必須フォーマット：
-1. 要旨（1〜2行）
-2. 次の1アクション（クリック/入力まで具体）
-3. 受け入れ条件（箇条書き3〜5）
-4. 注意点（箇条書き1〜3）
+            const makePreview = (urls) => {
+              if (!urls || urls.length === 0) return '';
+              const imgTags = urls.map(u => `![](${u})`).join('\n\n'); // 画像間は空行1つ
+              return `<details>\n<summary>📷 添付画像（${urls.length}枚）</summary>\n\n${imgTags}\n\n</details>`;
+            };
 
-制約：
-- 過去コメントやIssue本文の画像は参照しない（画像はこの後に別枠で付く）
-- 技術用語は必要最小限。カタカナ語は短い補足を（　）で付ける
-EOF
+            const previewBlock = makePreview(images);
 
-          {
-            echo ""
-            echo "-----"
-            echo "Event: $EVENT_NAME"
-            echo "Issue: #$ISSUE_NUMBER"
-            echo "Title:"
-            echo "$ISSUE_TITLE"
-            echo ""
-            echo "Body:"
-            echo "$ISSUE_BODY"
-            if [[ "$EVENT_NAME" == "issue_comment" ]]; then
-              echo ""
-              echo "Comment:"
-              echo "$COMMENT_BODY"
-            fi
-          } >> prompt.txt
+            // -----------------------------
+            // Bot本文（OpenAIが使えれば生成、ダメなら固定文）
+            // -----------------------------
+            let aiText = '';
+            const apiKey = process.env.OPENAI_API_KEY || '';
 
-          payload="$(jq -n --arg model "gpt-4o-mini" --rawfile user prompt.txt '{
-            model: $model,
-            temperature: 0.2,
-            messages: [
-              {role:"system", content:"You are a helpful assistant."},
-              {role:"user", content:$user}
-            ]
-          }')"
+            const formatReq =
+              `返答は必ず次の形で:\n` +
+              `1. 要旨（1〜2行）\n` +
+              `2. 次の1アクション（1つだけ）\n` +
+              `3. 受け入れ条件（箇条書き）\n` +
+              `4. 注意点（箇条書き）\n`;
 
-          resp="$(curl -sS https://api.openai.com/v1/chat/completions \
-            -H "Authorization: Bearer '"$OPENAI_API_KEY"'" \
-            -H "Content-Type: application/json" \
-            -d "$payload" || true)"
+            const prompt = isIssue
+              ? `Issue #${issueNumber}\nTitle: ${issueTitle}\nBody:\n${issueBody}\n\n${formatReq}`
+              : `Issue #${issueNumber}\nTitle: ${issueTitle}\nComment:\n${commentBody}\n\n${formatReq}`;
 
-          text="$(printf "%s" "$resp" | jq -r '.choices[0].message.content // empty' || true)"
+            if (apiKey) {
+              try {
+                const res = await fetch('https://api.openai.com/v1/responses', {
+                  method: 'POST',
+                  headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                  },
+                  body: JSON.stringify({
+                    model: 'gpt-4o',
+                    input: prompt
+                  })
+                });
 
-          if [[ -z "${text:-}" ]]; then
-            # fallback
-            {
-              echo "1. 要旨"
-              echo "Bot返信の生成でエラーが出たため、簡易返信に切り替えました。"
-              echo ""
-              echo "2. 次の1アクション"
-              echo "Actionsログでエラー行（赤）を1つだけ特定して貼ってください。"
-              echo ""
-              echo "3. 受け入れ条件"
-              echo "・Botが返信する"
-              echo "・画像がある時だけプレビューが出る"
-              echo ""
-              echo "4. 注意点"
-              echo "・YAMLのインデント崩れが最頻出です"
-            } > bot_text.md
-          else
-            printf "%s\n" "$text" > bot_text.md
-          fi
+                const data = await res.json();
 
-          # Self-check
-          if grep -q "要旨" bot_text.md && grep -q "次の1アクション" bot_text.md; then
-            echo "self_check=PASS" >> "$GITHUB_OUTPUT"
-          else
-            echo "self_check=FAIL" >> "$GITHUB_OUTPUT"
-          fi
+                aiText = data.output_text || '';
+                if (!aiText && Array.isArray(data.output)) {
+                  const parts = [];
+                  for (const item of data.output) {
+                    if (item.type === 'message' && Array.isArray(item.content)) {
+                      for (const c of item.content) {
+                        if (c.type === 'output_text' && c.text) parts.push(c.text);
+                      }
+                    }
+                  }
+                  aiText = parts.join('\n');
+                }
+              } catch (e) {
+                core.warning(`OpenAI call failed: ${e?.message || e}`);
+              }
+            }
 
-      - name: Compose Final Comment
-        id: compose
-        if: steps.decide.outputs.should_reply == 'true'
-        shell: bash
-        run: |
-          set -eu
-          cp bot_text.md final_comment.md
+            if (!aiText) {
+              aiText =
+                `1. 要旨\n` +
+                `Botがコマンドを受け取りました。\n\n` +
+                `2. 次の1アクション\n` +
+                `このIssueに「/check（画像2枚つき）」でコメントしてください。\n\n` +
+                `3. 受け入れ条件\n` +
+                `- Botが返信する\n` +
+                `- 画像がある時だけプレビューが出る\n\n` +
+                `4. 注意点\n` +
+                `- 画像は「/check と同じコメント」に貼ると確実です\n`;
+            }
 
-          # 画像プレビューは「そのコメントに画像がある時だけ」
-          if [[ -f image_preview.md ]]; then
-            echo "" >> final_comment.md
-            cat image_preview.md >> final_comment.md
-          fi
+            // -----------------------------
+            // 投稿本文（プレビュー → 区切り → 本文）
+            // -----------------------------
+            const bodyParts = [];
+            if (previewBlock) bodyParts.push(previewBlock, '\n---\n');
+            bodyParts.push(aiText);
 
-      - name: Post Comment to Issue
-        if: steps.decide.outputs.should_reply == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -eu
-
-          OWNER="${{ github.repository_owner }}"
-          REPO_NAME="$(echo "${{ github.repository }}" | cut -d/ -f2)"
-          ISSUE_NUMBER="${{ steps.ctx.outputs.issue_number }}"
-
-          body="$(cat final_comment.md)"
-
-          gh api "repos/${OWNER}/${REPO_NAME}/issues/${ISSUE_NUMBER}/comments" \
-            -f body="$body"
-
-          echo "::notice::posted comment to #$ISSUE_NUMBER (self_check=${{ steps.gen.outputs.self_check || 'N/A' }})"
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: bodyParts.join('\n')
+            });
