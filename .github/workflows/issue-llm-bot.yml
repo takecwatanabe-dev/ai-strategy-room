@@ -1,12 +1,11 @@
 # ================================================================
 # AI戦略会議室 | Issue LLM Bot
-# Version: v1.0.5
-# Date: 2025-12-16 12:26 JST
+# Version: v1.0.6
+# Date: 2025-12-16 13:20 JST
 # Changes:
-#  - issue_comment(/approve|/check) の画像プレビュー対象を「そのコメントに添付された画像」に限定
-#    （Issue本文の画像は issues(opened/reopened) のときだけ扱う）
-#  - 画像プレビューの見た目を安定化（<img width="720"> で統一）
-#  - 画像URL抽出を強化（Markdown/HTML両対応、重複除去、最大4枚）
+#  - /approve または /check コメントに画像がある場合のみプレビュー生成
+#  - 画像が無い場合はプレビュー全体を出力しない（スキップ）
+#  - 過去Issue本文や過去コメントの画像は一切参照しない（完全独立）
 # ================================================================
 
 name: Issue LLM Bot
@@ -34,7 +33,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Build prompt & images (Python)
+      - name: Build prompt & selective preview (Python)
         id: build
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -56,113 +55,55 @@ jobs:
           comment_body = os.getenv("COMMENT_BODY") or ""
 
           def has_cmd(s: str) -> bool:
-            if not s:
-              return False
-            return bool(re.search(r'(^|\s)/(approve|check)(\s|$)', s, flags=re.IGNORECASE))
+            return bool(re.search(r'(^|\s)/(approve|check)(\s|$)', s or "", flags=re.IGNORECASE))
 
-          def extract_image_urls(text: str):
+          def extract_images(text: str):
+            urls = []
             if not text:
               return []
-            urls = []
-            # Markdown: ![alt](url)
-            for m in re.finditer(r'!\[[^\]]*\]\((https?://[^)\s]+)\)', text):
-              urls.append(m.group(1).strip())
-            # HTML: <img src="url">
-            for m in re.finditer(r'<img[^>]+src=["\'](https?://[^"\']+)["\']', text, flags=re.IGNORECASE):
-              urls.append(m.group(1).strip())
-
-            # de-dup (keep order)
-            seen = set()
-            out = []
+            # Markdown ![](URL)
+            urls += re.findall(r'!\[[^\]]*\]\((https?://[^)\s]+)\)', text)
+            # HTML <img src="URL">
+            urls += re.findall(r'<img[^>]+src=["\'](https?://[^"\']+)["\']', text, flags=re.IGNORECASE)
+            # remove duplicates
+            seen, out = set(), []
             for u in urls:
               if u not in seen:
                 seen.add(u)
                 out.append(u)
-            return out
+            return out[:4]
 
-          # ---- decide run ----
           should_run = False
-          image_source_text = ""  # where to pick images from
-          if event == "issues":
-            # 自動返信は [TASK] のみ
-            if title.startswith("[TASK]"):
-              should_run = True
-              image_source_text = issue_body  # Issue本文の画像
-          elif event == "issue_comment":
-            # /approve or /check のときだけ返信
-            if has_cmd(comment_body):
-              should_run = True
-              image_source_text = comment_body  # ★コメント添付の画像だけ
-          else:
-            should_run = False
+          image_urls = []
 
-          # ---- images ----
-          image_urls = extract_image_urls(image_source_text)[:4]
+          if event == "issue_comment" and has_cmd(comment_body):
+            should_run = True
+            image_urls = extract_images(comment_body)
 
-          preview_md = ""
-          if image_urls:
-            lines = []
-            lines.append("<details>")
-            lines.append("<summary>添付画像（プレビュー）</summary>")
-            lines.append("")
-            for i, u in enumerate(image_urls, start=1):
-              # GitHub側で縮小されるので幅を統一して“暴れ”を抑える
-              lines.append(f'<img src="{u}" width="720" alt="image{i}">')
-              lines.append("")
-            lines.append("</details>")
-            preview_md = "\n".join(lines).strip() + "\n"
+          Path(".tmp/image_urls.json").write_text(json.dumps(image_urls, ensure_ascii=False), encoding="utf-8")
 
-          Path(".tmp/image_preview.md").write_text(preview_md, encoding="utf-8")
-
-          # ---- prompt ----
-          clean_comment = comment_body
-          if clean_comment:
-            clean_comment = re.sub(r'(^|\s)/(approve|check)(\s|$)', ' ', clean_comment, flags=re.IGNORECASE).strip()
-
-          prompt = f"""# 指示
-          あなたはGitHub Issueの運用ボットです。必ず日本語で、次の形式で短く出力してください。
-
+          # build request JSON
+          prompt = f"""# 要約
           1) 要旨（1〜2行）
           2) 次の1アクション（クリック/入力まで具体）
-          3) 受け入れ条件（チェック項目：最大5つ）
-          4) 注意点（秘密情報・APIキーなどは書かない）
+          3) 受け入れ条件（チェック項目）
+          4) 注意点（秘密情報は書かない）
 
-          # 対象Issue
-          番号: {issue_number}
-          タイトル: {title}
-
-          # Issue本文
+          # Issue {issue_number}: {title}
           {issue_body}
+
+          # コメント
+          {comment_body}
           """
 
-          if clean_comment:
-            prompt += f"\n# 直近コメント\n{clean_comment}\n"
+          Path(".tmp/prompt.txt").write_text(prompt, encoding="utf-8")
 
-          # ---- OpenAI request JSON ----
-          content = [{"type": "input_text", "text": prompt}]
-          for u in image_urls:
-            content.append({"type": "input_image", "image_url": u})
-
-          req = {
-            "model": "gpt-4o-mini",
-            "input": [
-              {"role": "user", "content": content}
-            ],
-            "temperature": 0.2
-          }
-          Path(".tmp/openai_request.json").write_text(json.dumps(req, ensure_ascii=False), encoding="utf-8")
-
-          # ---- outputs ----
-          out_path = os.environ.get("GITHUB_OUTPUT")
-          if out_path:
-            with open(out_path, "a", encoding="utf-8") as f:
-              f.write(f"should_run={'true' if should_run else 'false'}\n")
-              f.write(f"issue_number={issue_number}\n")
+          Path(os.environ["GITHUB_OUTPUT"]).write_text(f"should_run={'true' if should_run else 'false'}\n", encoding="utf-8")
           PY
 
       - name: Skip if not approved
         if: steps.build.outputs.should_run != 'true'
-        run: echo "Skip (not approved / not target issue)."
+        run: echo "Skip (not /approve or /check comment)."
 
       - name: Call OpenAI Responses API
         if: steps.build.outputs.should_run == 'true'
@@ -170,32 +111,26 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
-          curl -sS https://api.openai.com/v1/responses \
-            -H "Authorization: Bearer ${OPENAI_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d @.tmp/openai_request.json > .tmp/openai_response.json
-
           python - <<'PY'
           import json
           from pathlib import Path
-
-          data = json.loads(Path(".tmp/openai_response.json").read_text(encoding="utf-8"))
-
-          text = data.get("output_text")
-          if not text:
-            parts = []
-            for item in data.get("output", []) or []:
-              if item.get("type") == "message" and item.get("role") == "assistant":
-                for c in item.get("content", []) or []:
-                  if c.get("type") in ("output_text", "text") and c.get("text"):
-                    parts.append(c["text"])
-            text = "\n".join(parts).strip()
-
-          if not text:
-            text = "（Bot）返信本文の抽出に失敗しました。Actionsログと openai_response.json を確認してください。"
-
-          Path(".tmp/llm_text.txt").write_text(text.strip() + "\n", encoding="utf-8")
+          prompt = Path(".tmp/prompt.txt").read_text(encoding="utf-8")
+          images = json.loads(Path(".tmp/image_urls.json").read_text(encoding="utf-8"))
+          content = [{"type":"input_text","text":prompt}]
+          for u in images:
+            content.append({"type":"input_image","image_url":u})
+          data = {
+            "model":"gpt-4o-mini",
+            "input":[{"role":"user","content":content}],
+            "temperature":0.2
+          }
+          Path(".tmp/request.json").write_text(json.dumps(data,ensure_ascii=False),encoding="utf-8")
           PY
+
+          curl -sS https://api.openai.com/v1/responses \
+            -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d @.tmp/request.json > .tmp/response.json
 
       - name: Post comment to Issue
         if: steps.build.outputs.should_run == 'true'
@@ -206,21 +141,25 @@ jobs:
           import json
           from pathlib import Path
 
-          llm = Path(".tmp/llm_text.txt").read_text(encoding="utf-8").strip()
-          preview = Path(".tmp/image_preview.md").read_text(encoding="utf-8").strip()
+          resp = json.loads(Path(".tmp/response.json").read_text(encoding="utf-8"))
+          text = resp.get("output_text")
+          if not text:
+            text = "（Bot）返信本文の抽出に失敗しました。Actionsログを確認してください。"
 
-          body = llm
-          if preview:
-            body += "\n\n" + preview
+          images = json.loads(Path(".tmp/image_urls.json").read_text(encoding="utf-8"))
+          preview = ""
+          if images:
+            preview = "\n\n<details>\n<summary>添付画像（プレビュー）</summary>\n\n" + \
+                      "\n".join([f'<img src="{u}" width="720">' for u in images]) + \
+                      "\n\n</details>\n"
 
-          Path(".tmp/gh_comment.json").write_text(
-            json.dumps({"body": body}, ensure_ascii=False),
-            encoding="utf-8"
-          )
+          body = text.strip() + preview
+
+          Path(".tmp/comment.json").write_text(json.dumps({"body":body},ensure_ascii=False),encoding="utf-8")
           PY
 
           curl -sS -X POST \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "Content-Type: application/json" \
-            "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.build.outputs.issue_number }}/comments" \
-            -d @.tmp/gh_comment.json > /dev/null
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
+            -d @.tmp/comment.json > /dev/null
