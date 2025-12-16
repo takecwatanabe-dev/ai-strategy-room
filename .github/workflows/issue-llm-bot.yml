@@ -70,9 +70,17 @@ jobs:
 
           image_urls = []
           if event_name == "issue_comment" and should_reply:
-              image_urls += re.findall(r"!\[[^\]]*\]\((https?://[^)]+)\)", comment_body)
-              image_urls += re.findall(r"(https?://\S+?(?:png|jpg|jpeg|gif|webp))(?:\s|$)", comment_body, flags=re.IGNORECASE)
-              image_urls += re.findall(r"(https?://github\.com/\S+/assets/\S+)(?:\s|$)", comment_body)
+             # --- 画像URLを抽出（すべての形式をカバー） ---
+          patterns = [
+            r"!\[[^\]]*\]\((https?://[^\s)]+)\)",  # Markdown形式
+            r"(https?://[^\s)]+(?:png|jpg|jpeg|gif|webp))(?:\s|$)",  # 拡張子ありURL
+            r"(https?://github\.com/[^\s)]+/assets/[^\s)]+)",  # 従来のgithub.com/assets形式
+            r"(https?://private-user-images\.githubusercontent\.com/[^\s)]+)",  # 新形式（private-user-images）
+]
+          image_urls = []
+          for p in patterns:
+              image_urls += re.findall(p, comment_body, flags=re.IGNORECASE)
+
 
               seen, dedup = set(), []
               for u in image_urls:
