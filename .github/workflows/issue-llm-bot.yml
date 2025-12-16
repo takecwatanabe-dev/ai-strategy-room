@@ -1,11 +1,12 @@
 # ================================================================
-# AI戦略会議室｜Issue LLM Bot
-# Version: v1.0.5-fixed
-# Date: 2025-12-16 12:23 JST
+# AI戦略会議室 | Issue LLM Bot
+# Version: v1.0.5
+# Date: 2025-12-16 12:26 JST
 # Changes:
-# - YAML構文エラー修正（L57対応）
-# - 本文HTMLの誤エンコード対策（jqエスケープ追加）
-# - Botが本文全体を画像として誤出力する問題を修正
+#  - issue_comment(/approve|/check) の画像プレビュー対象を「そのコメントに添付された画像」に限定
+#    （Issue本文の画像は issues(opened/reopened) のときだけ扱う）
+#  - 画像プレビューの見た目を安定化（<img width="720"> で統一）
+#  - 画像URL抽出を強化（Markdown/HTML両対応、重複除去、最大4枚）
 # ================================================================
 
 name: Issue LLM Bot
@@ -23,72 +24,203 @@ permissions:
 jobs:
   bot:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Set up job
-        run: echo "🚀 Start Issue LLM Bot"
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
-
-      - name: Install jq
-        run: sudo apt-get install -y jq
+          python-version: "3.11"
 
       - name: Build prompt & images (Python)
+        id: build
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          echo "⚙️ Building prompt..."
+          python - <<'PY'
+          import os, re, json
+          from pathlib import Path
 
-          # イベント種別で分岐
-          if [[ "${{ github.event_name }}" == "issue_comment" ]]; then
-            ISSUE_NUMBER="${{ github.event.issue.number }}"
-            ISSUE_TITLE="${{ github.event.issue.title }}"
-            ISSUE_BODY="${{ github.event.comment.body }}"
-            PROMPT_TEXT="Comment on Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
-          else
-            ISSUE_NUMBER="${{ github.event.issue.number }}"
-            ISSUE_TITLE="${{ github.event.issue.title }}"
-            ISSUE_BODY="${{ github.event.issue.body }}"
-            PROMPT_TEXT="Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
-          fi
+          Path(".tmp").mkdir(parents=True, exist_ok=True)
 
-          # ✅ 本文のHTMLタグや画像URLを文字列化して安全に扱う
-          ISSUE_BODY=$(echo "$ISSUE_BODY" | jq -Rs . | jq -r .)
+          event = (os.getenv("EVENT_NAME") or "").strip()
+          issue_number = (os.getenv("ISSUE_NUMBER") or "").strip()
+          title = (os.getenv("ISSUE_TITLE") or "").strip()
+          issue_body = os.getenv("ISSUE_BODY") or ""
+          comment_body = os.getenv("COMMENT_BODY") or ""
 
-          echo "Prompt created for Issue #${ISSUE_NUMBER}"
+          def has_cmd(s: str) -> bool:
+            if not s:
+              return False
+            return bool(re.search(r'(^|\s)/(approve|check)(\s|$)', s, flags=re.IGNORECASE))
+
+          def extract_image_urls(text: str):
+            if not text:
+              return []
+            urls = []
+            # Markdown: ![alt](url)
+            for m in re.finditer(r'!\[[^\]]*\]\((https?://[^)\s]+)\)', text):
+              urls.append(m.group(1).strip())
+            # HTML: <img src="url">
+            for m in re.finditer(r'<img[^>]+src=["\'](https?://[^"\']+)["\']', text, flags=re.IGNORECASE):
+              urls.append(m.group(1).strip())
+
+            # de-dup (keep order)
+            seen = set()
+            out = []
+            for u in urls:
+              if u not in seen:
+                seen.add(u)
+                out.append(u)
+            return out
+
+          # ---- decide run ----
+          should_run = False
+          image_source_text = ""  # where to pick images from
+          if event == "issues":
+            # 自動返信は [TASK] のみ
+            if title.startswith("[TASK]"):
+              should_run = True
+              image_source_text = issue_body  # Issue本文の画像
+          elif event == "issue_comment":
+            # /approve or /check のときだけ返信
+            if has_cmd(comment_body):
+              should_run = True
+              image_source_text = comment_body  # ★コメント添付の画像だけ
+          else:
+            should_run = False
+
+          # ---- images ----
+          image_urls = extract_image_urls(image_source_text)[:4]
+
+          preview_md = ""
+          if image_urls:
+            lines = []
+            lines.append("<details>")
+            lines.append("<summary>添付画像（プレビュー）</summary>")
+            lines.append("")
+            for i, u in enumerate(image_urls, start=1):
+              # GitHub側で縮小されるので幅を統一して“暴れ”を抑える
+              lines.append(f'<img src="{u}" width="720" alt="image{i}">')
+              lines.append("")
+            lines.append("</details>")
+            preview_md = "\n".join(lines).strip() + "\n"
+
+          Path(".tmp/image_preview.md").write_text(preview_md, encoding="utf-8")
+
+          # ---- prompt ----
+          clean_comment = comment_body
+          if clean_comment:
+            clean_comment = re.sub(r'(^|\s)/(approve|check)(\s|$)', ' ', clean_comment, flags=re.IGNORECASE).strip()
+
+          prompt = f"""# 指示
+          あなたはGitHub Issueの運用ボットです。必ず日本語で、次の形式で短く出力してください。
+
+          1) 要旨（1〜2行）
+          2) 次の1アクション（クリック/入力まで具体）
+          3) 受け入れ条件（チェック項目：最大5つ）
+          4) 注意点（秘密情報・APIキーなどは書かない）
+
+          # 対象Issue
+          番号: {issue_number}
+          タイトル: {title}
+
+          # Issue本文
+          {issue_body}
+          """
+
+          if clean_comment:
+            prompt += f"\n# 直近コメント\n{clean_comment}\n"
+
+          # ---- OpenAI request JSON ----
+          content = [{"type": "input_text", "text": prompt}]
+          for u in image_urls:
+            content.append({"type": "input_image", "image_url": u})
+
+          req = {
+            "model": "gpt-4o-mini",
+            "input": [
+              {"role": "user", "content": content}
+            ],
+            "temperature": 0.2
+          }
+          Path(".tmp/openai_request.json").write_text(json.dumps(req, ensure_ascii=False), encoding="utf-8")
+
+          # ---- outputs ----
+          out_path = os.environ.get("GITHUB_OUTPUT")
+          if out_path:
+            with open(out_path, "a", encoding="utf-8") as f:
+              f.write(f"should_run={'true' if should_run else 'false'}\n")
+              f.write(f"issue_number={issue_number}\n")
+          PY
 
       - name: Skip if not approved
-        if: ${{ !contains(github.event.comment.body, '/approve') && github.event_name == 'issue_comment' }}
-        run: echo "⏭️ Skipping non-approved comment"
+        if: steps.build.outputs.should_run != 'true'
+        run: echo "Skip (not approved / not target issue)."
 
       - name: Call OpenAI Responses API
-        if: ${{ contains(github.event.comment.body, '/check') || github.event_name == 'issues' }}
+        if: steps.build.outputs.should_run == 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          echo "🧠 Calling OpenAI API..."
-          PROMPT_JSON=$(jq -n --arg prompt "$PROMPT_TEXT\n\n$ISSUE_BODY" '{model:"gpt-4o-mini",input:$prompt}')
-          echo "$PROMPT_JSON" > prompt.json
-
-          curl -s https://api.openai.com/v1/responses \
+          set -euo pipefail
+          curl -sS https://api.openai.com/v1/responses \
             -H "Authorization: Bearer ${OPENAI_API_KEY}" \
             -H "Content-Type: application/json" \
-            -d @prompt.json \
-            -o response.json
+            -d @.tmp/openai_request.json > .tmp/openai_response.json
 
-          jq . response.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path(".tmp/openai_response.json").read_text(encoding="utf-8"))
+
+          text = data.get("output_text")
+          if not text:
+            parts = []
+            for item in data.get("output", []) or []:
+              if item.get("type") == "message" and item.get("role") == "assistant":
+                for c in item.get("content", []) or []:
+                  if c.get("type") in ("output_text", "text") and c.get("text"):
+                    parts.append(c["text"])
+            text = "\n".join(parts).strip()
+
+          if not text:
+            text = "（Bot）返信本文の抽出に失敗しました。Actionsログと openai_response.json を確認してください。"
+
+          Path(".tmp/llm_text.txt").write_text(text.strip() + "\n", encoding="utf-8")
+          PY
 
       - name: Post comment to Issue
+        if: steps.build.outputs.should_run == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "💬 Posting response to issue..."
-          BODY=$(jq -r '.output[0].content[0].text // "No response generated."' response.json)
-          gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments \
-            -f body="$BODY"
+          python - <<'PY'
+          import json
+          from pathlib import Path
 
-      - name: Complete job
-        run: echo "✅ Job completed successfully"
+          llm = Path(".tmp/llm_text.txt").read_text(encoding="utf-8").strip()
+          preview = Path(".tmp/image_preview.md").read_text(encoding="utf-8").strip()
+
+          body = llm
+          if preview:
+            body += "\n\n" + preview
+
+          Path(".tmp/gh_comment.json").write_text(
+            json.dumps({"body": body}, ensure_ascii=False),
+            encoding="utf-8"
+          )
+          PY
+
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.build.outputs.issue_number }}/comments" \
+            -d @.tmp/gh_comment.json > /dev/null
