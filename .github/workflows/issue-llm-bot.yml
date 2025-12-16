@@ -1,269 +1,203 @@
-# ISSUE LLM BOT — v1.2.2
-# DATE(JST): 2025-12-14 19:17
-# TITLE: Thumbify images in issue body + fix OpenAI content types
-# CHANGES:
-#  - Use only OPENAI_API_KEY (no PENAI_*)
-#  - Auto-convert images in ISSUE BODY to thumbnail + details (md/img/raw url)
-#  - Also run on "edited" (body change) but without posting a new bot reply
-#  - Fix OpenAI Responses API content types: input_text / input_image
-# BUILD PARAM: ?b=2025-12-14_1917_thumb-body-r2
-# DEBUG: &debug=1 (optional)
-
 name: Issue LLM Bot
 
 on:
   issues:
-    types: [opened, reopened, edited]
-
-permissions:
-  contents: read
-  issues: write
+    types: [opened, edited]
+  issue_comment:
+    types: [created]
 
 jobs:
   llm_task:
-    if: github.event_name == 'issues' && startsWith(github.event.issue.title, '[TASK]')
     runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'issues' && github.event.issue.user.type != 'Bot') ||
+      (github.event_name == 'issue_comment' && 
+       github.event.comment.user.type != 'Bot' && 
+       github.event.actor != 'github-actions[bot]' &&
+       (contains(github.event.comment.body, '/approve') || 
+        contains(github.event.comment.body, '/review') ||
+        contains(github.event.comment.body, '/check')))
+    outputs:
+      check_result: ${{ steps.check.outputs.check_result }}
     steps:
-      - name: Post auto reply (TASK)
-        uses: actions/github-script@v7
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Generate Bot Response
+        id: generate
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: gpt-5-mini
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Issue情報を取得（issues イベントと issue_comment イベントの両方に対応）
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            ISSUE_NUMBER="${{ github.event.issue.number }}"
+            ISSUE_TITLE="${{ github.event.issue.title }}"
+            ISSUE_BODY="${{ github.event.issue.body }}"
+            COMMENT_BODY="${{ github.event.comment.body }}"
+            PROMPT_TEXT="Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}
+
+${ISSUE_BODY}
+
+コメント: ${COMMENT_BODY}
+
+上記のIssueとコメントに対して、適切な回答を生成してください。"
+          else
+            ISSUE_NUMBER="${{ github.event.issue.number }}"
+            ISSUE_TITLE="${{ github.event.issue.title }}"
+            ISSUE_BODY="${{ github.event.issue.body }}"
+            PROMPT_TEXT="Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}
+
+${ISSUE_BODY}
+
+上記のIssueに対して、適切な回答を生成してください。"
+          fi
+          
+          # プロンプトをJSONエスケープ
+          PROMPT_JSON=$(echo "$PROMPT_TEXT" | jq -Rs .)
+          
+          # OpenAI Responses APIを呼び出し
+          OPENAI_JSON=$(curl -s -X POST https://api.openai.com/v1/responses \
+            -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"model\": \"gpt-4o\",
+              \"input\": ${PROMPT_JSON}
+            }")
+          
+          # OpenAI Responses API仕様に合わせて本文を抽出
+          # .output_text が直接存在する場合、または .output[].content[].text(type=output_text) を連結
+          AI_TEXT=$(echo "$OPENAI_JSON" | jq -r '
+            if .output_text then
+              .output_text
+            else
+              ([.output[]? 
+                | select(.type=="message") 
+                | .content[]? 
+                | select(.type=="output_text") 
+                | .text] | join("\n"))
+            end
+          ' || echo "")
+          
+          # エラーチェック
+          if [ -z "$AI_TEXT" ] || [ "$AI_TEXT" = "null" ]; then
+            echo "::error::OpenAI API response parsing failed"
+            echo "Response: $OPENAI_JSON"
+            exit 1
+          fi
+          
+          COMMENT_BODY="$AI_TEXT"
+          
+          echo "commentBody<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMENT_BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Self-Check Image Links
+        id: check
+        run: |
+          COMMENT_BODY="${{ steps.generate.outputs.commentBody }}"
+          
+          # NG条件チェック
+          NG_DETECTED=false
+          CHECK_RESULT="PASS"
+          
+          # NG条件 a: <a タグで画像URLにリンクしている
+          # 画像URLのパターン: private-user-images.githubusercontent.com, user-images.githubusercontent.com など
+          if echo "$COMMENT_BODY" | grep -qiE '<a[^>]*href=["'"'"']?https?://[^"'"'"' ]*(private-user-images|user-images|githubusercontent\.com)'; then
+            NG_DETECTED=true
+            CHECK_RESULT="FAIL"
+            echo "::error::NG detected: <a tag linking to image URL"
+          fi
+          
+          # NG条件 b: Markdown画像リンクが残っている（![ と ]( の組み合わせ）
+          if echo "$COMMENT_BODY" | grep -qE '!\[[^\]]*\]\('; then
+            NG_DETECTED=true
+            CHECK_RESULT="FAIL"
+            echo "::error::NG detected: Markdown image link syntax (![ ... ](...)) found"
+          fi
+          
+          # 自己判定結果を先頭に追加
+          if [ "$NG_DETECTED" = "true" ]; then
+            FINAL_BODY="SELF-CHECK: image_link=YES (FAIL)
+
+$COMMENT_BODY"
+            echo "Self-check result: FAIL"
+          else
+            FINAL_BODY="SELF-CHECK: image_link=NO (PASS)
+
+$COMMENT_BODY"
+            echo "Self-check result: PASS"
+          fi
+          
+          echo "checkResult=$CHECK_RESULT" >> $GITHUB_OUTPUT
+          echo "check_result=$CHECK_RESULT" >> $GITHUB_OUTPUT
+          echo "finalBody<<EOF" >> $GITHUB_OUTPUT
+          echo "$FINAL_BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          # NGならジョブを失敗（core.setFailed相当）
+          if [ "$NG_DETECTED" = "true" ]; then
+            echo "::error::IMAGE_LINK_DETECTED"
+            exit 1
+          fi
+
+      - name: Post Comment
+        if: steps.check.outputs.checkResult == 'PASS'
+        uses: actions/github-script@v7
         with:
           script: |
-            const issue = context.payload.issue;
-            const action = context.payload.action;
-
-            const apiKey = process.env.OPENAI_API_KEY || "";
-            const model = process.env.OPENAI_MODEL || "gpt-5-mini";
-
-            function uniq(arr) {
-              return [...new Set(arr.filter(Boolean))];
-            }
-
-            function collectImageUrls(text) {
-              const urls = [];
-
-              // Markdown images: ![alt](url "title")
-              const mdRe = /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
-              for (const m of text.matchAll(mdRe)) urls.push(m[1]);
-
-              // HTML <img src="...">
-              const imgRe = /<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi;
-              for (const m of text.matchAll(imgRe)) urls.push(m[1]);
-
-              // Bare URLs (common GitHub image hosts)
-              const bareLineRe = /(^|\n)\s*(https?:\/\/(?:private-user-images\.githubusercontent\.com|user-images\.githubusercontent\.com|github\.com\/user-attachments\/assets)\/[^\s<>()]+)\s*(?=\n|$)/gi;
-              for (const m of text.matchAll(bareLineRe)) urls.push(m[2]);
-
-              return uniq(urls);
-            }
-
-            function thumbBlock(url, idx) {
-              const safeUrl = String(url).replace(/"/g, "&quot;");
-              const n = String(idx + 1).padStart(2, "0");
-
-                // Click thumb = toggle <details> (avoid opening new tab)
-                return [
-                `<!-- _NL_THUMBIFIED_${n} -->`,
-                `<details>`,
-                `<summary>`,
-                `<img data-nl-thumb="1" src="${safeUrl}" width="360" alt="image ${n} thumb" style="pointer-events:none;" />`,
-                `<div><b>画像${n}</b>（クリックで拡大／もう一度で閉じる）</div>`,
-                `</summary>`,
-                `<img data-nl-full="1" src="${safeUrl}" alt="image ${n} full" style="pointer-events:none;" />`,
-                `</details>`
-               ].join("\n");
-            }
-
-            function thumbifyIssueBody(text) {
-              if (!text) return { text, changed: false };
-
-              let out = text;
-
-              // 1) Markdown images -> thumb block
-              out = out.replace(/!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (m, url) => {
-                // skip if already thumbified nearby (best-effort)
-                if (m.includes("NL_THUMBIFIED")) return m;
-                return `\n${thumbBlock(url, 0)}\n`; // temp idx; will re-index later
-              });
-
-              // 2) HTML <img> (not ours) -> thumb block
-              out = out.replace(/<img\b([^>]*?)\bsrc=["']([^"']+)["']([^>]*?)>/gi, (m, pre, url, post) => {
-                if (m.includes('data-nl-thumb="1"')) return m; // ours
-                return `\n${thumbBlock(url, 0)}\n`;
-              });
-
-              // 3) Bare image URLs on their own line -> thumb block
-              out = out.replace(/(^|\n)\s*(https?:\/\/(?:private-user-images\.githubusercontent\.com|user-images\.githubusercontent\.com|github\.com\/user-attachments\/assets)\/[^\s<>()]+)\s*(?=\n|$)/gi, (m, head, url) => {
-                return `${head}\n${thumbBlock(url, 0)}\n`;
-              });
-
-              // If nothing inserted, done
-              if (!out.includes("NL_THUMBIFIED:")) {
-                return { text, changed: false };
-              }
-
-              // Re-index all thumbified blocks in order (so 01,02,03...)
-              const urls = collectImageUrls(out);
-              let idx = 0;
-              out = out.replace(/<!-- NL_THUMBIFIED:\d+ -->[\s\S]*?<\/div>/g, () => {
-                const url = urls[idx] || "";
-                const block = thumbBlock(url, idx);
-                idx += 1;
-                return block;
-              });
-
-              // Add marker to avoid pointless loops
-              if (!out.includes("<!-- NL_BODY_THUMBIFIED -->")) {
-                out = `<!-- NL_BODY_THUMBIFIED -->\n` + out;
-              }
-
-              return { text: out, changed: out !== text };
-            }
-
-            async function updateIssueBodyIfNeeded() {
-              const rawBody = issue.body || "";
-              const { text: newBody, changed } = thumbifyIssueBody(rawBody);
-              if (!changed) return { changed: false, error: null };
-
-              try {
-                await github.rest.issues.update({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issue.number,
-                  body: newBody
-                });
-                return { changed: true, error: null };
-              } catch (e) {
-                return { changed: false, error: String(e?.message || e) };
-              }
-            }
-
-            // ---- If "edited" and body changed: only thumbify body, do NOT post a new bot reply ----
-            if (action === "edited") {
-              const hasBodyChange = !!(context.payload.changes && context.payload.changes.body);
-              if (!hasBodyChange) return;
-
-              await updateIssueBodyIfNeeded();
-              return;
-            }
-
-            // ---- opened / reopened ----
-            const bodyUpdate = await updateIssueBodyIfNeeded();
-
-            const rawBody = issue.body || "";
-            const imageUrls = collectImageUrls(rawBody).slice(0, 6); // limit
-
-            // Build prompt for AI (keep it simple, Japanese)
-            const promptText = [
-              "あなたはGitHub Issueを整理するアシスタントです。",
-              "目的：依頼内容が空でもエラーにせず、次の1アクションだけ提案する。",
-              "条件：",
-              "- 専門用語は避ける（必要なら短い説明を添える）",
-              "- 返信は日本語",
-              "- 画像がある場合：本文の画像はサムネ化済み前提で、確認ポイントを短く聞く",
-              "- 依頼が空（No response等）の場合：『どこを見ればいいか（画面のどの部分か）』を1つだけ質問する",
-              "",
-              "出力は以下の見出しだけ：",
-              "要旨 / 次の1アクション（1つだけ） / 手順（Step 1→） / うまくいかない時 / 注意点",
-              "",
-              "Issue本文：",
-              rawBody
-            ].join("\n");
-
-            // Call OpenAI Responses API
-            if (!apiKey) {
-              await github.rest.issues.createComment({
+            // issues イベントと issue_comment イベントの両方に対応
+            const issue_number = context.payload.issue?.number || context.issue?.number;
+            if (issue_number) {
+              github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: issue.number,
-                body: [
-                  "Bot側でAI呼び出しに失敗しました。",
-                  "",
-                  "（内部エラー）OPENAI_API_KEY is missing (Secrets 未設定)",
-                  "",
-                  "※ APIキー本体は貼らないでください。"
-                ].join("\n")
+                issue_number: issue_number,
+                body: `${{ steps.check.outputs.finalBody }}`
               });
-              return;
             }
 
-            const inputContent = [{ type: "input_text", text: promptText }];
-            for (const url of imageUrls) {
-              inputContent.push({ type: "input_image", image_url: url });
-            }
+      - name: Notify Result
+        if: always()
+        run: |
+          echo "::notice::Action run result=${{ job.status }}"
 
-            let aiText = "";
-            let aiErr = "";
-
-            try {
-              const res = await fetch("https://api.openai.com/v1/responses", {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "Authorization": `Bearer ${apiKey}`
-                },
-                body: JSON.stringify({
-                  model,
-                  input: [{ role: "user", content: inputContent }],
-                })
+  notify:
+    needs: [llm_task]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            // issues イベントと issue_comment イベントの両方に対応
+            const issue_number = context.payload.issue?.number || context.issue?.number;
+            const jobResult = '${{ needs.llm_task.result }}'; // success / failure / cancelled
+            const selfCheck = '${{ needs.llm_task.outputs.check_result }}' || 'UNKNOWN';
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body =
+              `🧾 Issue LLM Bot 結果\n` +
+              `- job: ${jobResult}\n` +
+              `- self-check: ${selfCheck}\n` +
+              `- run: ${runUrl}\n`;
+            if (issue_number) {
+              await github.rest.issues.createComment({ 
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue_number,
+                body: body
               });
-
-              const data = await res.json();
-              if (!res.ok) {
-                aiErr = `OpenAI API error: ${res.status} ${res.statusText}\n` + JSON.stringify(data, null, 2);
-              } else {
-                aiText = (data.output_text || "").trim();
-                if (!aiText) aiText = "（空の応答でした）";
-              }
-            } catch (e) {
-              aiErr = String(e?.message || e);
             }
 
-            // Build image preview (thumbnail + details)
-            function buildPreview(urls) {
-              if (!urls.length) return "";
-              const blocks = urls.map((u, i) => thumbBlock(u, i)).join("\n\n");
-              return [
-                "",
-                "---",
-                "## 添付画像（プレビュー）",
-                blocks
-              ].join("\n");
-            }
-
-            const bodyStatusLine = bodyUpdate.error
-              ? `本文サムネ化：NG（${bodyUpdate.error}）`
-              : (bodyUpdate.changed ? "本文サムネ化：OK" : "本文サムネ化：変更なし");
-
-            const commentBody = aiErr
-              ? [
-                  "Bot側でAI呼び出しに失敗しました。",
-                  "",
-                  "```",
-                  aiErr,
-                  "```",
-                  "",
-                  `- ${bodyStatusLine}`,
-                  "",
-                  "承認して次へ進めるときは、コメント欄に `/approve` と書いてください。",
-                  buildPreview(imageUrls)
-                ].join("\n")
-              : [
-                  "## Bot返信（TASK）",
-                  "",
-                  aiText,
-                  "",
-                  `- ${bodyStatusLine}`,
-                  "",
-                  "承認して次へ進めるときは、コメント欄に `/approve` と書いてください。",
-                  buildPreview(imageUrls)
-                ].join("\n");
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issue.number,
-              body: commentBody
-            });
