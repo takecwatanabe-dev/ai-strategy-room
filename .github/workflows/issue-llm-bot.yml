@@ -1,203 +1,167 @@
+# ==============================================================
+# AI戦略会議室｜Issue LLM Bot
+# Version: v1.0.3
+# Date: 2025-12-16 11:35 JST
+# Changes:
+# - YAML構文エラー（line 50付近のインデント崩れ）を根治：プロンプト生成をheredoc＋ファイル化
+# - /approve または /check のコメント時だけ動く（無関係コメントでは動かない）
+# - OpenAI Responses API：output_text / output[].content[].text(type=output_text) の両対応で本文抽出
+# - 添付画像URLを最大4枚まで <details> でプレビュー表示
+# ==============================================================
+
 name: Issue LLM Bot
 
 on:
   issues:
-    types: [opened, edited]
+    types: [opened, reopened]
   issue_comment:
     types: [created]
 
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: issue-llm-bot-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
 jobs:
-  llm_task:
+  bot:
     runs-on: ubuntu-latest
-    if: |
-      (github.event_name == 'issues' && github.event.issue.user.type != 'Bot') ||
-      (github.event_name == 'issue_comment' && 
-       github.event.comment.user.type != 'Bot' && 
-       github.event.actor != 'github-actions[bot]' &&
-       (contains(github.event.comment.body, '/approve') || 
-        contains(github.event.comment.body, '/review') ||
-        contains(github.event.comment.body, '/check')))
-    outputs:
-      check_result: ${{ steps.check.outputs.check_result }}
+    if: ${{ github.event_name == 'issues' || (github.event_name == 'issue_comment' && (contains(github.event.comment.body, '/approve') || contains(github.event.comment.body, '/check'))) }}
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install jq
+      - name: Ensure jq is available
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
+          set -euo pipefail
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
 
-      - name: Generate Bot Response
-        id: generate
+      - name: Build prompt
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          COMMENT_BODY: ${{ github.event_name == 'issue_comment' && github.event.comment.body || '' }}
+        run: |
+          set -euo pipefail
+
+          # --- 基本指示（固定） ---
+          cat > prompt.txt <<'EOF'
+あなたは「戦略的会議室」の議事進行AIです。
+次のIssue/コメントを読み、以下の形式で日本語で返信してください。
+
+【出力形式】
+1) 要旨（1〜2行）
+2) 次の1アクション（クリック/入力まで具体）
+3) 添付画像（プレビュー）: 画像があれば <details> で折りたたみ表示（最大4枚）
+
+【注意】
+- 余計な前置きは不要
+- 安全上の配慮が必要な内容は注意喚起する
+EOF
+
+          # --- 入力（Issue/コメント） ---
+          {
+            echo ""
+            echo "----"
+            echo "Issue URL: ${ISSUE_URL}"
+            echo "Issue #: ${ISSUE_NUMBER}"
+            echo "Title: ${ISSUE_TITLE}"
+            echo ""
+            echo "Body:"
+            echo "${ISSUE_BODY}"
+            if [ "${EVENT_NAME}" = "issue_comment" ] && [ -n "${COMMENT_BODY}" ]; then
+              echo ""
+              echo "Comment:"
+              echo "${COMMENT_BODY}"
+            fi
+          } >> prompt.txt
+
+      - name: Call OpenAI (Responses API)
+        id: llm
+        shell: bash
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Issue情報を取得（issues イベントと issue_comment イベントの両方に対応）
-          if [ "${{ github.event_name }}" = "issue_comment" ]; then
-            ISSUE_NUMBER="${{ github.event.issue.number }}"
-            ISSUE_TITLE="${{ github.event.issue.title }}"
-            ISSUE_BODY="${{ github.event.issue.body }}"
-            COMMENT_BODY="${{ github.event.comment.body }}"
-            PROMPT_TEXT="Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}
+          set -euo pipefail
 
-${ISSUE_BODY}
+          PROMPT_JSON=$(jq -Rs . < prompt.txt)
 
-コメント: ${COMMENT_BODY}
-
-上記のIssueとコメントに対して、適切な回答を生成してください。"
-          else
-            ISSUE_NUMBER="${{ github.event.issue.number }}"
-            ISSUE_TITLE="${{ github.event.issue.title }}"
-            ISSUE_BODY="${{ github.event.issue.body }}"
-            PROMPT_TEXT="Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}
-
-${ISSUE_BODY}
-
-上記のIssueに対して、適切な回答を生成してください。"
-          fi
-          
-          # プロンプトをJSONエスケープ
-          PROMPT_JSON=$(echo "$PROMPT_TEXT" | jq -Rs .)
-          
-          # OpenAI Responses APIを呼び出し
-          OPENAI_JSON=$(curl -s -X POST https://api.openai.com/v1/responses \
+          OPENAI_JSON=$(curl -sS -X POST https://api.openai.com/v1/responses \
             -H "Authorization: Bearer ${OPENAI_API_KEY}" \
             -H "Content-Type: application/json" \
             -d "{
               \"model\": \"gpt-4o\",
               \"input\": ${PROMPT_JSON}
             }")
-          
-          # OpenAI Responses API仕様に合わせて本文を抽出
-          # .output_text が直接存在する場合、または .output[].content[].text(type=output_text) を連結
+
+          # 本文抽出（.output_text があれば優先、なければ output[] から連結）
           AI_TEXT=$(echo "$OPENAI_JSON" | jq -r '
-            if .output_text then
-              .output_text
-            else
-              ([.output[]? 
-                | select(.type=="message") 
-                | .content[]? 
-                | select(.type=="output_text") 
-                | .text] | join("\n"))
-            end
-          ' || echo "")
-          
-          # エラーチェック
+            (.output_text // ([.output[]?
+              | select(.type=="message")
+              | .content[]?
+              | select(.type=="output_text")
+              | .text] | join("\n")))
+          ' || true)
+
           if [ -z "$AI_TEXT" ] || [ "$AI_TEXT" = "null" ]; then
-            echo "::error::OpenAI API response parsing failed"
-            echo "Response: $OPENAI_JSON"
-            exit 1
+            ERR=$(echo "$OPENAI_JSON" | jq -r '.error.message // empty' || true)
+            echo "::error::OpenAI response parsing failed"
+            echo "RAW: $OPENAI_JSON"
+            if [ -n "$ERR" ]; then
+              AI_TEXT="（Bot側でAI呼び出しに失敗しました）\n\n原因: ${ERR}\n\n次の1アクション: Actionsのログ（Generate/Call OpenAI部分）を開いて、エラー行を貼ってください。"
+            else
+              AI_TEXT="（Bot側でAI呼び出しに失敗しました）\n\n次の1アクション: Actionsのログを開いて、RAW出力（Response: ...）を貼ってください。"
+            fi
           fi
-          
-          COMMENT_BODY="$AI_TEXT"
-          
-          echo "commentBody<<EOF" >> $GITHUB_OUTPUT
-          echo "$COMMENT_BODY" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Self-Check Image Links
-        id: check
+          # 添付画像URL抽出（最大4）
+          IMG_URLS=$(grep -oE 'https://[^ )"]+' prompt.txt \
+            | grep -E 'github\.com/.*/assets|user-images\.githubusercontent\.com|githubusercontent\.com' \
+            | head -n 4 || true)
+
+          if [ -n "$IMG_URLS" ]; then
+            AI_TEXT="${AI_TEXT}
+
+---
+
+## 添付画像（プレビュー）
+<details><summary>画像を開く（最大4枚）</summary>
+
+"
+            while IFS= read -r url; do
+              [ -z "$url" ] && continue
+              AI_TEXT="${AI_TEXT}![](${url})
+
+"
+            done <<< "$IMG_URLS"
+            AI_TEXT="${AI_TEXT}</details>"
+          fi
+
+          echo "ai_text<<EOF" >> "$GITHUB_OUTPUT"
+          printf "%s\n" "$AI_TEXT" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Post comment to Issue
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          AI_TEXT: ${{ steps.llm.outputs.ai_text }}
         run: |
-          COMMENT_BODY="${{ steps.generate.outputs.commentBody }}"
-          
-          # NG条件チェック
-          NG_DETECTED=false
-          CHECK_RESULT="PASS"
-          
-          # NG条件 a: <a タグで画像URLにリンクしている
-          # 画像URLのパターン: private-user-images.githubusercontent.com, user-images.githubusercontent.com など
-          if echo "$COMMENT_BODY" | grep -qiE '<a[^>]*href=["'"'"']?https?://[^"'"'"' ]*(private-user-images|user-images|githubusercontent\.com)'; then
-            NG_DETECTED=true
-            CHECK_RESULT="FAIL"
-            echo "::error::NG detected: <a tag linking to image URL"
-          fi
-          
-          # NG条件 b: Markdown画像リンクが残っている（![ と ]( の組み合わせ）
-          if echo "$COMMENT_BODY" | grep -qE '!\[[^\]]*\]\('; then
-            NG_DETECTED=true
-            CHECK_RESULT="FAIL"
-            echo "::error::NG detected: Markdown image link syntax (![ ... ](...)) found"
-          fi
-          
-          # 自己判定結果を先頭に追加
-          if [ "$NG_DETECTED" = "true" ]; then
-            FINAL_BODY="SELF-CHECK: image_link=YES (FAIL)
+          set -euo pipefail
+          COMMENT_JSON=$(printf "%s" "$AI_TEXT" | jq -Rs .)
 
-$COMMENT_BODY"
-            echo "Self-check result: FAIL"
-          else
-            FINAL_BODY="SELF-CHECK: image_link=NO (PASS)
-
-$COMMENT_BODY"
-            echo "Self-check result: PASS"
-          fi
-          
-          echo "checkResult=$CHECK_RESULT" >> $GITHUB_OUTPUT
-          echo "check_result=$CHECK_RESULT" >> $GITHUB_OUTPUT
-          echo "finalBody<<EOF" >> $GITHUB_OUTPUT
-          echo "$FINAL_BODY" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          
-          # NGならジョブを失敗（core.setFailed相当）
-          if [ "$NG_DETECTED" = "true" ]; then
-            echo "::error::IMAGE_LINK_DETECTED"
-            exit 1
-          fi
-
-      - name: Post Comment
-        if: steps.check.outputs.checkResult == 'PASS'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // issues イベントと issue_comment イベントの両方に対応
-            const issue_number = context.payload.issue?.number || context.issue?.number;
-            if (issue_number) {
-              github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue_number,
-                body: `${{ steps.check.outputs.finalBody }}`
-              });
-            }
-
-      - name: Notify Result
-        if: always()
-        run: |
-          echo "::notice::Action run result=${{ job.status }}"
-
-  notify:
-    needs: [llm_task]
-    if: always()
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-    steps:
-      - uses: actions/github-script@v7
-        with:
-          script: |
-            // issues イベントと issue_comment イベントの両方に対応
-            const issue_number = context.payload.issue?.number || context.issue?.number;
-            const jobResult = '${{ needs.llm_task.result }}'; // success / failure / cancelled
-            const selfCheck = '${{ needs.llm_task.outputs.check_result }}' || 'UNKNOWN';
-            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const body =
-              `🧾 Issue LLM Bot 結果\n` +
-              `- job: ${jobResult}\n` +
-              `- self-check: ${selfCheck}\n` +
-              `- run: ${runUrl}\n`;
-            if (issue_number) {
-              await github.rest.issues.createComment({ 
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue_number,
-                body: body
-              });
-            }
-
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/issues/${ISSUE_NUMBER}/comments" \
+            -d "{\"body\": ${COMMENT_JSON} }" >/dev/null
