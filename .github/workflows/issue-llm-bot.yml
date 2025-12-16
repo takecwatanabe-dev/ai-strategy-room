@@ -1,13 +1,12 @@
-# ==============================================================
+# ============================================================
 # AI戦略会議室｜Issue LLM Bot
-# Version: v1.0.4
-# Date: 2025-12-16 11:49 JST
+# Version: v1.0.5
+# Date: 2025-12-16 12:02 JST
 # Changes:
-# - YAML構文崩れ（L57付近）を根治：イベント読み取り/プロンプト生成をPythonに集約
-# - /approve または /check のコメント時だけ返信（それ以外のコメントは成功終了でスキップ）
-# - OpenAI Responses API の本文抽出を堅牢化（output_text or output[].content[].text）
-# - 添付画像URLを最大4枚まで <details> で自動プレビュー付与
-# ==============================================================
+# - 修正: issue_comment が issues 配下に入っていたため、起動しない（/approve /check 反応なし）→ 正しい階層に修正
+# - 維持: OpenAI Responses API の本文抽出（.output_text / output[].content[].text）
+# - 維持: 添付画像を最大4枚まで <details> でプレビュー
+# ============================================================
 
 name: Issue LLM Bot
 
@@ -26,120 +25,179 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
       - name: Install jq
-        shell: bash
         run: |
-          set -euo pipefail
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y jq
-          fi
+          sudo apt-get update
+          sudo apt-get install -y jq
 
-      - name: Build prompt from event
-        id: ctx
-        shell: bash
+      - name: Build prompt & images (Python)
+        id: prep
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
         run: |
-          set -euo pipefail
-          python - <<'PY'
-          import json, os, re, textwrap
+          python3 - <<'PY'
+          import os, json, re
 
-          event_path = os.environ.get("GITHUB_EVENT_PATH")
           event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+          event_path = os.environ.get("GITHUB_EVENT_PATH", "")
 
           with open(event_path, "r", encoding="utf-8") as f:
-            e = json.load(f)
+            ev = json.load(f)
 
-          issue = e.get("issue") or {}
-          comment_obj = e.get("comment") or {}
+          issue = ev.get("issue") or {}
+          comment = ev.get("comment") or {}
 
-          issue_number = issue.get("number") or ""
-          issue_title  = issue.get("title") or ""
-          issue_body   = issue.get("body") or ""
-          comment_body = comment_obj.get("body") or ""
+          issue_number = issue.get("number")
+          issue_title = issue.get("title") or ""
+          issue_body  = issue.get("body")  or ""
+          issue_url   = issue.get("html_url") or ""
 
-          # /approve または /check のときだけ動く（それ以外はスキップ）
+          comment_body = comment.get("body") or ""
+
+          # /approve または /check のときだけ起動（issue_comment時）
           should_run = True
           if event_name == "issue_comment":
-            if ("/approve" not in comment_body) and ("/check" not in comment_body):
-              should_run = False
+            cb = (comment_body or "").strip()
+            should_run = cb.startswith("/approve") or cb.startswith("/check")
 
-          # 画像URL（最大4）
-          text_all = (issue_body or "") + "\n" + (comment_body or "")
-          urls = re.findall(r'https?://[^\s)"]+', text_all)
+          # 画像URL抽出（Markdown画像 / 直URL / GitHub添付URL）
+          def extract_image_urls(text: str):
+            urls = []
+            if not text:
+              return urls
+            # ![](url)
+            for m in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", text):
+              urls.append(m.strip())
+            # http(s)://...png|jpg|jpeg|gif|webp
+            for m in re.findall(r"https?://\S+\.(?:png|jpg|jpeg|gif|webp)(?:\?\S+)?", text, flags=re.I):
+              urls.append(m.strip())
+            # GitHub attachments (no extension sometimes, but usually ends with png/jpg etc)
+            for m in re.findall(r"https?://github\.com/\S+", text, flags=re.I):
+              if any(ext in m.lower() for ext in [".png", ".jpg", ".jpeg", ".gif", ".webp"]):
+                urls.append(m.strip())
+            # 重複除去（順序保持）
+            seen = set()
+            out = []
+            for u in urls:
+              if u not in seen:
+                seen.add(u)
+                out.append(u)
+            return out
+
           img_urls = []
-          for u in urls:
-            if ("user-images.githubusercontent.com" in u) or ("/assets/" in u and "github.com/" in u) or ("githubusercontent.com" in u and "user-attachments" in u):
-              img_urls.append(u)
+          img_urls += extract_image_urls(issue_body)
+          img_urls += extract_image_urls(comment_body)
           img_urls = img_urls[:4]
 
-          base = """あなたは「戦略的会議室」の議事進行AIです。
-          次のIssue/コメントを読み、必ず【出力形式】だけで日本語で返信してください。
+          images_md = ""
+          if img_urls:
+            lines = []
+            lines.append("<details>")
+            lines.append("<summary>添付画像（プレビュー）</summary>")
+            lines.append("")
+            for i, u in enumerate(img_urls, 1):
+              lines.append(f"![image{i:02d}]({u})")
+              lines.append("")
+            lines.append("</details>")
+            images_md = "\n".join(lines).strip() + "\n"
 
-          【出力形式】
-          1) 要旨（1〜2行）
-          2) 次の1アクション（クリック/入力まで具体）
-
-          【注意】
-          - 余計な前置きは不要
-          - 画像プレビューはシステム側で付けるので、本文に画像URLは貼らない
-          """
-
-          context = f"""---- INPUT ----
-          Event: {event_name}
-          Issue #: {issue_number}
-          Title:
-          {issue_title}
-
-          Body:
-          {issue_body}
-          """
-
+          # プロンプト
+          prompt_lines = []
+          prompt_lines.append("あなたは「AI戦略的会議室」のIssue対応Botです。日本語で、短く、実行しやすく書いてください。")
+          prompt_lines.append("")
+          prompt_lines.append("【必須フォーマット】")
+          prompt_lines.append("1) 要旨（1〜2行）")
+          prompt_lines.append("2) 次の1アクション（クリック/入力まで具体）")
+          prompt_lines.append("3) 受け入れ条件（チェック項目）")
+          prompt_lines.append("4) 注意点（秘密情報・APIキーなどは書かない）")
+          prompt_lines.append("")
+          prompt_lines.append("【入力】")
+          prompt_lines.append(f"URL: {issue_url}")
+          prompt_lines.append(f"Title: {issue_title}")
+          prompt_lines.append("")
+          prompt_lines.append("Body:")
+          prompt_lines.append(issue_body or "(本文なし)")
           if event_name == "issue_comment":
-            context += f"""
-
-          Comment:
-          {comment_body}
-          """
-
-          prompt = textwrap.dedent(base).strip() + "\n\n" + textwrap.dedent(context).strip() + "\n"
+            prompt_lines.append("")
+            prompt_lines.append("Comment:")
+            prompt_lines.append(comment_body or "(コメントなし)")
+          prompt = "\n".join(prompt_lines).strip() + "\n"
 
           with open("prompt.txt", "w", encoding="utf-8") as f:
             f.write(prompt)
+          with open("images_md.txt", "w", encoding="utf-8") as f:
+            f.write(images_md)
 
-          with open("images.txt", "w", encoding="utf-8") as f:
-            for u in img_urls:
-              f.write(u + "\n")
-
-          # GitHub Outputs
           out_path = os.environ.get("GITHUB_OUTPUT")
-          def out(k, v):
-            with open(out_path, "a", encoding="utf-8") as o:
-              o.write(f"{k}={v}\n")
-
-          out("issue_number", str(issue_number))
-          out("should_run", "true" if should_run else "false")
+          with open(out_path, "a", encoding="utf-8") as f:
+            f.write(f"issue_number={issue_number}\n")
+            f.write(f"should_run={'true' if should_run else 'false'}\n")
           PY
 
-      - name: Skip (no command)
-        if: ${{ steps.ctx.outputs.should_run != 'true' }}
-        shell: bash
+      - name: Skip if not approved
+        if: steps.prep.outputs.should_run != 'true' && github.event_name == 'issue_comment'
         run: |
-          echo "Skip: comment does not include /approve or /check"
+          echo "Skip: comment is not /approve or /check"
+          exit 0
 
-      - name: Call OpenAI (Responses API)
-        if: ${{ steps.ctx.outputs.should_run == 'true' }}
+      - name: Call OpenAI Responses API
         id: llm
-        shell: bash
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          set -euo pipefail
-
-          PROMPT_JSON=$(jq -Rs . < prompt.txt)
+          PROMPT_JSON=$(cat prompt.txt | jq -Rs .)
 
           OPENAI_JSON=$(curl -sS -X POST https://api.openai.com/v1/responses \
             -H "Authorization: Bearer ${OPENAI_API_KEY}" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"model\": \"gpt-4o\",
-              \"input\":
+            -d "{ \"model\": \"gpt-4o\", \"input\": ${PROMPT_JSON} }")
+
+          AI_TEXT=$(echo "$OPENAI_JSON" | jq -r '
+            if .output_text then
+              .output_text
+            else
+              ([.output[]?
+                | select(.type=="message")
+                | .content[]?
+                | select(.type=="output_text")
+                | .text] | join("\n"))
+            end
+          ' || echo "")
+
+          if [ -z "$AI_TEXT" ] || [ "$AI_TEXT" = "null" ]; then
+            echo "::error::OpenAI response parsing failed"
+            echo "Response: $OPENAI_JSON"
+            exit 1
+          fi
+
+          IMAGES_MD=$(cat images_md.txt 2>/dev/null || true)
+
+          COMMENT_BODY="$AI_TEXT"
+          if [ -n "$IMAGES_MD" ]; then
+            COMMENT_BODY="$COMMENT_BODY\n\n$IMAGES_MD"
+          fi
+
+          echo "commentBody<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$COMMENT_BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Post comment to Issue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          ISSUE_NUMBER="${{ steps.prep.outputs.issue_number }}"
+          BODY="${{ steps.llm.outputs.commentBody }}"
+
+          PAYLOAD=$(jq -n --arg body "$BODY" '{body:$body}')
+
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments" \
+            -d "$PAYLOAD"
