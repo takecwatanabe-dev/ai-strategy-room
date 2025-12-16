@@ -207,7 +207,6 @@ jobs:
                 body: JSON.stringify({
                   model,
                   input: [{ role: "user", content: inputContent }],
-                  temperature: 0.2
                 })
               });
 
