@@ -1,3 +1,10 @@
+# Issue LLM Bot — v0.2.0-img-preview-02
+# Build(JST): 2025-12-16 16:24
+# Policy:
+#  - 画像プレビューは「/check または /approve の“そのコメント”に画像がある時だけ」
+#  - Issue本文・過去コメントの画像は拾わない
+#  - 画像は <details>/<summary> で折りたたみ、枚数表示＋画像間に空行を入れる
+
 name: Issue LLM Bot
 
 on:
@@ -5,266 +12,42 @@ on:
     types: [opened, reopened]
   issue_comment:
     types: [created]
-  workflow_dispatch:
 
 permissions:
   contents: read
   issues: write
 
 jobs:
-  llm_bot:
+  llm_task:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Run Issue LLM Bot
+      - name: Prepare Context (decide reply + extract images from current comment only)
+        id: ctx
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # 使いたいモデル名（必要ならここだけ変える）
-          OPENAI_MODEL: gpt-4.1-mini
-          # これはGitHubが自動で用意してくれるトークン（PAT不要）
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
-          python3 - << 'PY'
-          import os, json, re, textwrap, urllib.request
+          python3 - <<'PY'
+          import os, json, re, base64
 
-          # ==================================================
-          # Issue LLM Bot — v0.1.2
-          # Build: 2025-12-16 15:51 JST
-          # Changes:
-          #  - /approve or /check の「そのコメント」に画像がある時だけ、画像プレビュー（折りたたみ）を付ける
-          #  - 過去コメント/Issue本文の画像は拾わない
-          #  - 画像が無い時はテキストのみ返信
-          # ==================================================
+          def b64(s: str) -> str:
+            return base64.b64encode((s or "").encode("utf-8")).decode("ascii")
 
-          def starts_with_task(title: str) -> bool:
-              t = (title or "").strip()
-              return t.startswith("[TASK]") or t.startswith("【TASK】") or t.lower().startswith("[task]")
-
-          def has_task_label(issue: dict) -> bool:
-              for lb in (issue.get("labels") or []):
-                  name = (lb.get("name") or "").strip().lower()
-                  if name in ("task", "tasks"):
-                      return True
-              return False
-
-          def contains_command(body: str) -> str:
-              b = (body or "").lower()
-              if "/approve" in b:
-                  return "approve"
-              if "/check" in b:
-                  return "check"
-              return ""
-
-          def extract_image_urls_from_comment(comment_body: str) -> list[str]:
-              text = comment_body or ""
-              patterns = [
-                  r'!\[[^\]]*\]\((https?://[^\s)]+)\)',  # ![alt](URL)
-                  r'\((https?://[^\s)]+\.(?:png|jpe?g|gif|webp)(?:\?[^\s)]*)?)\)',  # (https://...png)
-                  r'(https?://github\.com/user-attachments/assets/[^\s)]+)',  # user-attachments
-                  r'(https?://private-user-images\.githubusercontent\.com/[^\s)]+)',  # private-user-images
-              ]
-
-              found: list[str] = []
-              for p in patterns:
-                  try:
-                      hits = re.findall(p, text, flags=re.IGNORECASE)
-                  except re.error:
-                      hits = []
-                  for h in hits:
-                      if isinstance(h, tuple):
-                          h = h[0]
-                      found.append(h)
-
-              # 重複排除（順序維持）
-              seen = set()
-              dedup: list[str] = []
-              for u in found:
-                  u = (u or "").strip().strip('"').strip("'").rstrip(").,")
-                  if u and u not in seen:
-                      seen.add(u)
-                      dedup.append(u)
-              return dedup
-
-          def clamp(s: str, limit: int) -> str:
-              s = s or ""
-              return s if len(s) <= limit else (s[:limit] + "\n...(truncated)")
-
-          def extract_output_text(resp: dict) -> str:
-              out_texts: list[str] = []
-              for out in (resp.get("output") or []):
-                  if (out or {}).get("type") == "message" and (out or {}).get("role") == "assistant":
-                      for c in (out.get("content") or []):
-                          t = c.get("text")
-                          if isinstance(t, str) and t.strip():
-                              out_texts.append(t.strip())
-              if out_texts:
-                  return "\n\n".join(out_texts).strip()
-
-              # fallback
-              if isinstance(resp.get("output_text"), str) and resp["output_text"].strip():
-                  return resp["output_text"].strip()
-
-              return ""
-
-          def openai_generate(prompt: str, image_urls: list[str]) -> str:
-              api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-              if not api_key:
-                  return "（エラー）OPENAI_API_KEY が未設定です。リポジトリの Secrets に OPENAI_API_KEY を登録してください。"
-
-              model = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini").strip()
-
-              content = [{"type": "input_text", "text": prompt}]
-              for u in (image_urls or [])[:4]:
-                  content.append({"type": "input_image", "image_url": u})
-
-              payload = {
-                  "model": model,
-                  "input": [{"role": "user", "content": content}],
-                  "max_output_tokens": 800
-              }
-
-              req = urllib.request.Request(
-                  "https://api.openai.com/v1/responses",
-                  data=json.dumps(payload).encode("utf-8"),
-                  headers={
-                      "Authorization": f"Bearer {api_key}",
-                      "Content-Type": "application/json"
-                  },
-                  method="POST"
-              )
-
-              try:
-                  with urllib.request.urlopen(req, timeout=60) as r:
-                      raw = r.read().decode("utf-8")
-              except Exception as e:
-                  return f"（エラー）OpenAI API 呼び出しに失敗しました: {e}"
-
-              try:
-                  data = json.loads(raw)
-              except Exception:
-                  return "（エラー）OpenAI API の返却がJSONとして解釈できませんでした。"
-
-              text = extract_output_text(data)
-              return text.strip() if text.strip() else "（エラー）OpenAIの返答テキストを抽出できませんでした。"
-
-          def post_github_comment(repo: str, issue_number: int, body: str) -> tuple[bool, str]:
-              token = os.environ.get("GITHUB_TOKEN", "").strip()
-              if not token:
-                  return False, "GITHUB_TOKEN が見つかりませんでした。"
-
-              url = f"https://api.github.com/repos/{repo}/issues/{issue_number}/comments"
-              req = urllib.request.Request(
-                  url,
-                  data=json.dumps({"body": body}).encode("utf-8"),
-                  headers={
-                      "Authorization": f"Bearer {token}",
-                      "Accept": "application/vnd.github+json",
-                      "Content-Type": "application/json"
-                  },
-                  method="POST"
-              )
-              try:
-                  with urllib.request.urlopen(req, timeout=30) as r:
-                      _ = r.read()
-                  return True, "ok"
-              except Exception as e:
-                  return False, str(e)
-
-          # -------- main --------
           event_name = os.environ.get("GITHUB_EVENT_NAME", "")
-          event_path = os.environ.get("GITHUB_EVENT_PATH", "")
-          repo = os.environ.get("GITHUB_REPOSITORY", "")
+          path = os.environ["GITHUB_EVENT_PATH"]
+          with open(path, "r", encoding="utf-8") as f:
+            ev = json.load(f)
 
-          if not event_path or not os.path.exists(event_path):
-              print("No event payload found.")
-              raise SystemExit(0)
+          issue = ev.get("issue") or {}
+          issue_number = str(issue.get("number") or "")
+          issue_title = issue.get("title") or ""
+          issue_body = issue.get("body") or ""
 
-          with open(event_path, "r", encoding="utf-8") as f:
-              payload = json.load(f)
-
-          actor = (payload.get("sender") or {}).get("login") or ""
-          if actor == "github-actions[bot]":
-              print("Skip: actor is github-actions[bot]")
-              raise SystemExit(0)
-
-          should_reply = False
-          cmd = ""
-          image_urls: list[str] = []
-
-          issue = {}
-          issue_number = 0
-          issue_body = ""
           comment_body = ""
+          command = ""
+          should_reply = False
 
           if event_name == "issues":
-              issue = payload.get("issue") or {}
-              title = issue.get("title") or ""
-              if starts_with_task(title) or has_task_label(issue):
-                  should_reply = True
-              issue_number = int(issue.get("number") or 0)
-              issue_body = issue.get("body") or ""
-
-          elif event_name == "issue_comment":
-              issue = payload.get("issue") or {}
-              comment = payload.get("comment") or {}
-              comment_body = comment.get("body") or ""
-              cmd = contains_command(comment_body)
-
-              # /approve or /check の時だけ返信する
-              if cmd:
-                  should_reply = True
-                  image_urls = extract_image_urls_from_comment(comment_body)
-
-              issue_number = int(issue.get("number") or 0)
-              issue_body = issue.get("body") or ""
-
-          else:
-              print(f"Skip: unsupported event {event_name}")
-              raise SystemExit(0)
-
-          if not should_reply or issue_number <= 0:
-              print("Skip: should_reply is false")
-              raise SystemExit(0)
-
-          title = (issue.get("title") or "").strip()
-          issue_url = (issue.get("html_url") or "").strip()
-
-          prompt = textwrap.dedent(f"""
-              あなたは「AI戦略会議室」のGitHub運用を補助するBotです。
-              必ず次のフォーマットで、日本語で、短めに出力してください（余計な前置き不要）。
-
-              1. 要旨（1〜2行）
-              2. 次の1アクション（クリック/入力まで具体）
-              3. 受け入れ条件（箇条書き）
-              4. 注意点（1〜3個）
-
-              --- 参考情報 ---
-              [Issue]
-              - title: {title}
-              - url: {issue_url}
-
-              [Issue本文]
-              {clamp(issue_body, 12000)}
-
-              [今回のコメント]
-              {clamp(comment_body, 8000)}
-          """).strip()
-
-          answer = openai_generate(prompt, image_urls)
-
-          # 画像プレビュー（必要な時だけ：/approve or /check かつ画像あり）
-          should_preview = (cmd in ("approve", "check")) and (len(image_urls) > 0)
-
-          final_body = answer.strip()
-          if should_preview:
-              final_body += "\n\n---\n\n<details>\n<summary>添付画像（プレビュー）</summary>\n\n"
-              for i, u in enumerate(image_urls, 1):
-                  final_body += f"![image{i}]({u})\n\n"
-              final_body += "</details>\n"
-
-          ok, msg = post_github_comment(repo, issue_number, final_body)
-          if not ok:
-              print(f"Failed to post comment: {msg}")
-              raise SystemExit(1)
-
-          print(f"Posted comment to #{issue_number}. image_preview={should_preview}")
-          PY
+            # [TASK] で始まるIssueのみ自動返信（必要ならここを緩めてOK）
+            t = (issue_title or
