@@ -1,0 +1,76 @@
+name: AI Room Mock
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+
+jobs:
+  ai_room_mock:
+    runs-on: ubuntu-latest
+    if: |
+      github.event.comment.user.type != 'Bot' &&
+      github.actor != 'github-actions[bot]' &&
+      contains(github.event.comment.body, '/room')
+
+    steps:
+      - name: Post Mock Response (3 headings + optional image preview)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue_number = context.payload.issue?.number;
+            const commentBody  = context.payload.comment?.body || "";
+
+            if (!issue_number) return;
+
+            // 画像URLは「そのコメント本文」からだけ抽出（過去/本文は拾わない）
+            const patterns = [
+              /!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/g,                 // Markdown ![](...)
+              /<img[^>]+src=["'](https?:\/\/[^"']+)["'][^>]*>/gi,     // HTML <img src="">
+              /(https?:\/\/github\.com\/user-attachments\/assets\/[^\s)]+)/g,
+              /(https?:\/\/user-images\.githubusercontent\.com\/[^\s)]+)/g,
+              /(https?:\/\/private-user-images\.githubusercontent\.com\/[^\s)]+)/g
+            ];
+
+            let urls = [];
+            for (const re of patterns) {
+              let m;
+              while ((m = re.exec(commentBody)) !== null) {
+                const u = (m[1] || m[0] || "").trim();
+                if (u) urls.push(u);
+              }
+            }
+            urls = [...new Set(urls)];
+
+            // 画像プレビュー（0枚なら出さない）
+            let preview = "";
+            if (urls.length > 0) {
+              const imgs = urls.map(u => `![](${u})`).join("\n\n"); // 空行1つ
+              preview =
+                `<details><summary>📷 添付画像（${urls.length}枚）</summary>\n\n` +
+                `${imgs}\n\n</details>`;
+            }
+
+            // 3カラム分離用モック（見出し固定）
+            const mock = [
+              "### 🤍 YUI（モック文）",
+              "ここにYuiの返答が入ります。",
+              "",
+              "### 🦁 REX（モック文）",
+              "ここにRexの返答が入ります。",
+              "",
+              "### ✨ GEMINI（モック文）",
+              "ここにGeminiの返答が入ります。"
+            ].join("\n");
+
+            let body = mock;
+            if (preview) body = `${preview}\n\n---\n\n${mock}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              body
+            });
