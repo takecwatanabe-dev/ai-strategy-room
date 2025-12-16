@@ -77,7 +77,7 @@ jobs:
             COMMENT_BODY="${{ github.event.comment.body }}"
             PROMPT_TEXT="Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}
 
-${ISSUE_BODY}
+echo "${ISSUE_BODY}"
 
 コメント: ${COMMENT_BODY}
 
