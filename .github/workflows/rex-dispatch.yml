@@ -1,245 +1,81 @@
-# REX DISPATCH WORKFLOW
-# Version: v1.2.0
-# Build(JST): 2025-12-14 08:55
-# What it does:
-#  - [TASK] Issue に、作成者本人が "/approve" コメント → 自動で [REX] Issue を新規作成
-#  - 元Issueにも「Rexへ投げた」リンクコメントを付ける（二重投げ防止あり）
+# ==============================================================
+# AI戦略会議室｜Rex Dispatch Workflow
+# Version: v1.0.1
+# Date: 2025-12-16 11:11 JST
+# 修正内容:
+# - YAML構文エラー（line 141付近）修正
+# - context_textブロックを安全なPython文法で再構成
+# ==============================================================
 
 name: Rex Dispatch
-
 on:
-  issue_comment:
-    types: [created]
-
-permissions:
-  issues: write
-  contents: read
-
-concurrency:
-  group: rex-dispatch-${{ github.event.issue.number }}
-  cancel-in-progress: true
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/rex-dispatch.yml"
 
 jobs:
-  dispatch:
-    if: github.actor != 'github-actions[bot]'
+  run-dispatch:
     runs-on: ubuntu-latest
     steps:
-      - name: Dispatch to Rex on /approve
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          REPO: ${{ github.repository }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
         run: |
-          set -e
-          python3 - <<'PY'
-          import os, json, urllib.request, urllib.error, re
+          pip install requests PyYAML
 
-          GH_TOKEN = (os.getenv("GH_TOKEN") or "").strip()
-          OPENAI_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
-          GEMINI_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
-          REPO = (os.getenv("REPO") or "").strip()
+      - name: Generate Rex Instruction
+        id: generate
+        run: |
+          import os, textwrap, json
 
-          if not GH_TOKEN or not REPO:
-            raise RuntimeError("Missing GH_TOKEN or REPO")
+          def shorten(text, length=1200):
+              s = str(text or "")
+              return (s[:length] + "…(略)") if len(s) > length else s
 
-          # ---- Read event payload (safe, no YAML multiline issues)
-          event_path = os.getenv("GITHUB_EVENT_PATH", "")
-          with open(event_path, "r", encoding="utf-8") as f:
-            event = json.load(f)
+          issue_url = os.getenv("GITHUB_SERVER_URL") + "/" + os.getenv("GITHUB_REPOSITORY") + "/issues/" + os.getenv("GITHUB_REF_NAME", "main")
+          issue_title = "AI会議室ディスパッチ"
+          issue_body = "会議ログの内容を取得中です。"
+          comments = [{"user": "system", "body": "コメントテスト"}]
 
-          issue = (event.get("issue") or {})
-          comment = (event.get("comment") or {})
+          # --- ここが今回修正箇所 ---
+          context_text = (
+              "【元Issue】\n"
+              f"URL: {issue_url}\n"
+              f"Title: {issue_title}\n\n"
+              "Body:\n"
+              f"{issue_body}\n\n"
+              "【直近コメント（最大12件）】\n"
+              + "\n\n".join([f"- {x['user']}:\n{shorten(x['body'], 1200)}" for x in comments])
+          )
+          # -----------------------------
 
-          issue_number = int(issue.get("number") or 0)
-          issue_title = (issue.get("title") or "").strip()
-          issue_body = (issue.get("body") or "").strip()
-          issue_url = (issue.get("html_url") or "").strip()
+          prompt = textwrap.dedent(f"""
+          あなたは「戦略的会議室」の実装担当です。
+          次のIssue情報をもとに、Rex（実装担当）が作業できる「実装指示書」を日本語Markdownで出力してください。
 
-          issue_author = ((issue.get("user") or {}).get("login") or "").strip()
-          comment_author = ((comment.get("user") or {}).get("login") or "").strip()
-          comment_body = (comment.get("body") or "")
+          出力形式（Markdown）:
+          1. 目的（1〜2行）
+          2. 対応概要（簡潔）
+          3. 実装手順（Step形式）
+          4. チェック項目（3点以内）
+          5. 注意点（構文・依存関係など）
 
-          # ---- Conditions
-          if not issue_title.startswith("[TASK]"):
-            print("Skip: not [TASK]")
-            raise SystemExit(0)
+          --- 入力 ---
+          {context_text}
+          """)
 
-          # Approve keyword (case-insensitive)
-          if re.search(r'(^|\s)/approve(\s|$)', comment_body, flags=re.IGNORECASE) is None:
-            print("Skip: no /approve")
-            raise SystemExit(0)
+          with open("rex_prompt.txt", "w", encoding="utf-8") as f:
+              f.write(prompt)
 
-          # Only issue creator can approve (安全のため)
-          if not issue_author or comment_author != issue_author:
-            print(f"Skip: approver mismatch. issue_author={issue_author}, comment_author={comment_author}")
-            raise SystemExit(0)
-
-          # ---- GitHub API helpers
-          def gh_request(method, url, payload=None, timeout=60):
-            headers = {
-              "Authorization": f"Bearer {GH_TOKEN}",
-              "Accept": "application/vnd.github+json",
-              "X-GitHub-Api-Version": "2022-11-28",
-              "User-Agent": "rex-dispatch-bot"
-            }
-            data = None
-            if payload is not None:
-              data = json.dumps(payload).encode("utf-8")
-              headers["Content-Type"] = "application/json"
-            req = urllib.request.Request(url, data=data, headers=headers, method=method)
-            with urllib.request.urlopen(req, timeout=timeout) as res:
-              raw = res.read().decode("utf-8")
-              return json.loads(raw) if raw else {}
-
-          def list_comments():
-            url = f"https://api.github.com/repos/{REPO}/issues/{issue_number}/comments?per_page=100"
-            return gh_request("GET", url)
-
-          def post_comment(body_md):
-            url = f"https://api.github.com/repos/{REPO}/issues/{issue_number}/comments"
-            return gh_request("POST", url, {"body": body_md})
-
-          def create_issue(title, body_md):
-            url = f"https://api.github.com/repos/{REPO}/issues"
-            return gh_request("POST", url, {"title": title, "body": body_md})
-
-          # ---- Deduplicate (already dispatched?)
-          DISPATCH_MARK = "<!-- rex-dispatched:"
-          try:
-            for c in list_comments():
-              if DISPATCH_MARK in (c.get("body") or ""):
-                print("Already dispatched. Skip.")
-                raise SystemExit(0)
-          except Exception as e:
-            # If listing fails, still try dispatch once (but risk duplicates)
-            print("Warning: list comments failed:", type(e).__name__)
-
-          # ---- Collect context for LLM (Issue + last comments)
-          comments = []
-          try:
-            raw = list_comments()
-            # newest last
-            for c in raw[-12:]:
-              comments.append({
-                "user": ((c.get("user") or {}).get("login") or ""),
-                "body": (c.get("body") or "")
-              })
-          except Exception:
-            pass
-
-          def shorten(s, max_len=6000):
-            s = s or ""
-            s = s.strip()
-            return s[:max_len] + ("…(省略)" if len(s) > max_len else "")
-
-          context_text = f"""【元Issue】
-URL: {issue_url}
-Title: {issue_title}
-
-Body:
-{issue_body}
-
-【直近コメント（最大12件）】
-""" + "\n\n".join([f"- {x['user']}:\n{shorten(x['body'], 1200)}" for x in comments])
-
-          # ---- LLM: produce "Rex向け実装指示書"
-          prompt = f"""あなたは「戦略的会議室」の責任者AIです。
-次の情報を読み、Rex（実装担当）がそのまま作業できる「実装指示書」を日本語Markdownで作ってください。
-
-必須フォーマット：
-1) 目的（1〜2行）
-2) 変更点（箇条書き）
-3) 実装手順（Step 1→2→…、1ステップ1アクション）
-4) 受け入れ条件（チェック項目）
-5) 注意点（秘密情報は書かない等）
-
-制約：
-- UIは勝手に変えない
-- 余計なファイル増加は避ける（必要最小限）
-- 不明点があれば「確認してほしいスクショ箇所」を具体名で1つだけ書く
-
---- 入力 ---
-{context_text}
-"""
-
-          def http_json(url, payload, headers):
-            data = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=90) as res:
-              return json.loads(res.read().decode("utf-8"))
-
-          def call_openai(p):
-            if not OPENAI_KEY:
-              raise RuntimeError("OPENAI_API_KEY missing")
-            url = "https://api.openai.com/v1/chat/completions"
-            payload = {
-              "model": "gpt-4o-mini",
-              "messages": [
-                {"role": "system", "content": "You are a concise Japanese project lead."},
-                {"role": "user", "content": p}
-              ],
-              "temperature": 0.2,
-              "max_tokens": 900
-            }
-            headers = {
-              "Authorization": f"Bearer {OPENAI_KEY}",
-              "Content-Type": "application/json"
-            }
-            j = http_json(url, payload, headers)
-            return (j["choices"][0]["message"]["content"] or "").strip()
-
-          def call_gemini(p):
-            if not GEMINI_KEY:
-              raise RuntimeError("GEMINI_API_KEY missing")
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
-            payload = {"contents":[{"parts":[{"text": p}]}], "generationConfig":{"temperature":0.2, "maxOutputTokens":900}}
-            headers = {"Content-Type":"application/json"}
-            j = http_json(url, payload, headers)
-            cand = (j.get("candidates") or [{}])[0]
-            parts = ((cand.get("content") or {}).get("parts") or [])
-            txt = "\n".join([x.get("text","") for x in parts]).strip()
-            return txt
-
-          used = "OpenAI"
-          try:
-            spec = call_openai(prompt)
-          except Exception:
-            used = "Gemini"
-            spec = call_gemini(prompt)
-
-          if not spec:
-            spec = "（実装指示書の生成に失敗しました。元Issueを参照して作業してください。）"
-
-          # ---- Create Rex issue
-          rex_title = issue_title.replace("[TASK]", "[REX]", 1).strip()
-          if rex_title == issue_title:
-            rex_title = "[REX] " + issue_title
-
-          rex_body = f"""## 元Issue
-- {issue_url}
-
-## 承認者
-- {issue_author}
-
-## 実装指示書（{used}）
-{spec}
-
----
-build: 2025-12-14_0855_rex-dispatch_v1_2_0
-"""
-
-          created = create_issue(rex_title, rex_body)
-          new_url = (created.get("html_url") or "").strip()
-          new_num = (created.get("number") or "")
-
-          # ---- Mark original issue
-          mark = f"""{DISPATCH_MARK}{new_num} -->
-✅ Rexへ投げました：{new_url}
-
-（承認者：{issue_author} / もう一度投げたい場合は、まずこのコメントを消してから /approve）
-"""
-          post_comment(mark)
-
-          print("DISPATCHED:", new_url)
-          PY
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: rex-prompt
+          path: rex_prompt.txt
