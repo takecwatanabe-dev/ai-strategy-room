@@ -1,15 +1,21 @@
 /**
  * APP: AI Strategy Room
  * FILE: Code.gs (Server-side)
- * VERSION: v0.2.9-fix-model-case
- * BUILD: 2025-12-20_0120_fix-case-sensitivity
- * * 【修正内容】
- * - GitHub連携は成功を確認。
- * - AIモデル名の判定を「大文字・小文字区別なし」に修正し、Unknown Modelエラーを解決。
+ * VERSION: v0.2.9-fix-history-bug
+ * BUILD: 2025-12-20_0145_fix-foreach-error
+ * * 【統合版】v0.2.8機能 + GitHub連携(Code Sync) + バグ修正
+ * * 【修正情報】
+ * 修正日時: 2025-12-20 01:45:00 JST
+ * 修正AI: Gemini (ジェミニ)
+ * AI種類: Google Gemini 2.0 Flash Exp
+ * 修正内容: 
+ * - GitHub連携機能の実装 (@codeコマンドでコード参照)
+ * - 履歴データの展開ロジック修正 (hist.forEachエラーの解消)
+ * - AIモデル名の判定ロジック修正 (大文字・小文字の区別を撤廃)
  */
 
 // --- 設定・定数 ---
-const VER = "v0.2.9-fix-model-case";
+const VER = "v0.2.9-fix-history-bug";
 const FOLDER_NAME = "AI_Strategy_Room_Images";
 
 // ペルソナ定義（システムプロンプト）
@@ -128,14 +134,22 @@ function fetchGithubCodeByCommand(text) {
 
 
 /**
- * AI呼び出し分岐（ここを修正：小文字対応）
+ * AI呼び出し分岐（履歴オブジェクト解析修正版）
  */
-function callAIWithHistory(prompt, images, model, history) {
+function callAIWithHistory(prompt, images, model, historyPayload) {
   const props = PropertiesService.getScriptProperties();
-  const hist = history || [];
   
-  // ★修正ポイント：入力されたモデル名を小文字に統一して判定する
+  // モデル名を小文字に統一
   const m = model.toLowerCase();
+
+  // ★修正ポイント：履歴オブジェクトから、このAI用の配列を正しく取り出す
+  let hist = [];
+  if (historyPayload && historyPayload.perAIHistory && historyPayload.perAIHistory[m]) {
+    hist = historyPayload.perAIHistory[m];
+  } else if (Array.isArray(historyPayload)) {
+    // 万が一、配列が直接来た場合の保険
+    hist = historyPayload;
+  }
 
   // --- Yui (OpenAI) ---
   if (m === 'yui') {
