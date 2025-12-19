@@ -1,17 +1,15 @@
 /**
  * APP: AI Strategy Room
  * FILE: Code.gs (Server-side)
- * VERSION: v0.2.9-code-sync
- * BUILD: 2025-12-20_0045_github-integration
- * * 【統合版】v0.2.8機能 + GitHub連携(Code Sync)
- * * [新機能: CODE SYNC]
- * テーマ入力欄に以下のコマンドを混ぜると、GitHubから最新コードを取得してAIに読ませます。
- * - @code file index.html  : 指定ファイルの要約と重要箇所を添付
- * - @code full index.html  : 指定ファイルの全文を添付（最大2万文字）
+ * VERSION: v0.2.9-fix-model-case
+ * BUILD: 2025-12-20_0115_fix-case-sensitivity
+ * * 【修正内容】
+ * - GitHub連携は成功を確認。
+ * - AIモデル名の判定を「大文字・小文字区別なし」に修正し、Unknown Modelエラーを解決。
  */
 
 // --- 設定・定数 ---
-const VER = "v0.2.9-code-sync";
+const VER = "v0.2.9-fix-model-case";
 const FOLDER_NAME = "AI_Strategy_Room_Images";
 
 // ペルソナ定義（システムプロンプト）
@@ -42,7 +40,7 @@ function initAuth() {
  * クライアントからのメイン呼び出し
  */
 function runRelay(theme, imagesBase64, aiModel, historyPayload) {
-  // 1. 画像保存（Safe Mode: 失敗しても続行）
+  // 1. 画像保存（Safe Mode）
   let driveLinks = [];
   try {
     if (imagesBase64 && imagesBase64.length > 0) {
@@ -52,11 +50,10 @@ function runRelay(theme, imagesBase64, aiModel, historyPayload) {
     console.warn("Drive Save Skipped: " + e.message);
   }
 
-  // 2. CODE SYNC: コマンド解析とコード取得 (v0.2.9 新機能)
+  // 2. CODE SYNC: GitHub連携
   let augmentedTheme = theme;
   let systemNotice = "";
   
-  // @code または @c コマンドを検出
   if (theme.includes("@code") || theme.includes("@c ")) {
     try {
       const codeData = fetchGithubCodeByCommand(theme);
@@ -73,7 +70,6 @@ function runRelay(theme, imagesBase64, aiModel, historyPayload) {
   let responseText = "";
   try {
     responseText = callAIWithHistory(augmentedTheme, imagesBase64, aiModel, historyPayload);
-    // システム通知があれば回答の先頭に付与
     if (systemNotice) {
       responseText = systemNotice + "\n\n" + responseText;
     }
@@ -85,18 +81,16 @@ function runRelay(theme, imagesBase64, aiModel, historyPayload) {
 }
 
 /**
- * GitHubコード取得ロジック (v0.2.9)
+ * GitHubコード取得ロジック
  */
 function fetchGithubCodeByCommand(text) {
-  // コマンド解析: @code (file|full) filename
-  // 短縮形: @c (file|full) filename
   const regex = /@(code|c)\s+(file|full)\s+([\w\.-]+)/i;
   const match = text.match(regex);
   
-  if (!match) return null; // コマンド形式でなければ何もしない
+  if (!match) return null;
 
-  const mode = match[2].toLowerCase(); // file or full
-  const filename = match[3];           // index.html or Code.gs
+  const mode = match[2].toLowerCase();
+  const filename = match[3];
 
   const props = PropertiesService.getScriptProperties();
   const token = props.getProperty('GITHUB_TOKEN');
@@ -104,16 +98,15 @@ function fetchGithubCodeByCommand(text) {
   const repo = props.getProperty('GITHUB_REPO');
 
   if (!token || !owner || !repo) {
-    throw new Error("GitHub設定不足: スクリプトプロパティ(GITHUB_TOKEN等)を確認してください");
+    throw new Error("GitHub設定不足: スクリプトプロパティを確認してください");
   }
 
-  // GitHub API (Contents)
   const url = `https://api.github.com/repos/${owner}/${repo}/contents/${filename}`;
   const options = {
     method: "get",
     headers: {
       "Authorization": `Bearer ${token}`,
-      "Accept": "application/vnd.github.v3.raw" // 生データ(Raw)を取得
+      "Accept": "application/vnd.github.v3.raw"
     },
     muteHttpExceptions: true
   };
@@ -124,9 +117,6 @@ function fetchGithubCodeByCommand(text) {
   }
 
   let content = res.getContentText();
-  
-  // トークン対策: 文字数制限 (Truncate)
-  // fullなら2万文字、file(要約用)なら3000文字でカット
   const MAX_CHARS = (mode === 'full') ? 20000 : 3000;
   
   if (content.length > MAX_CHARS) {
@@ -138,14 +128,17 @@ function fetchGithubCodeByCommand(text) {
 
 
 /**
- * AI呼び出し分岐（履歴・ペルソナ対応）
+ * AI呼び出し分岐（ここを修正：小文字対応）
  */
 function callAIWithHistory(prompt, images, model, history) {
   const props = PropertiesService.getScriptProperties();
   const hist = history || [];
+  
+  // ★修正ポイント：入力されたモデル名を小文字に統一して判定する
+  const m = model.toLowerCase();
 
   // --- Yui (OpenAI) ---
-  if (model === 'Yui') {
+  if (m === 'yui') {
     const apiKey = props.getProperty('OPENAI_API_KEY');
     if (!apiKey) throw new Error("OpenAI API Key not set.");
     
@@ -172,7 +165,7 @@ function callAIWithHistory(prompt, images, model, history) {
   }
 
   // --- Rex (Claude) ---
-  if (model === 'Rex') {
+  if (m === 'rex') {
     const apiKey = props.getProperty('ANTHROPIC_API_KEY');
     if (!apiKey) throw new Error("Anthropic API Key not set.");
 
@@ -201,11 +194,10 @@ function callAIWithHistory(prompt, images, model, history) {
   }
 
   // --- Gemini (Google) ---
-  if (model === 'Gemini' || model === 'GEMINI') {
+  if (m === 'gemini') {
     const apiKey = props.getProperty('GEMINI_API_KEY');
     if (!apiKey) throw new Error("Gemini API Key not set.");
 
-    // モデル名の取得（models/除去）
     let modelName = props.getProperty('GEMINI_MODEL') || 'gemini-2.5-flash';
     modelName = modelName.replace(/^models\//, '').trim();
 
@@ -233,7 +225,7 @@ function callAIWithHistory(prompt, images, model, history) {
     return fetchGeminiWithRetry(url, payload);
   }
 
-  return "Error: Unknown Model Selected";
+  return "Error: Unknown Model Selected (" + model + ")";
 }
 
 // --- 共通Fetch関数 ---
@@ -286,7 +278,6 @@ function fetchGeminiWithRetry(url, payload) {
 
 // --- Drive保存 (Safe Mode) ---
 function saveImagesToDriveSafe(theme, imagesBase64) {
-  // フォルダ取得（無ければ作成）
   let folder;
   const it = DriveApp.getFoldersByName(FOLDER_NAME);
   if (it.hasNext()) {
