@@ -2,7 +2,7 @@
  * APP: AI Strategy Room
  * FILE: Code.gs (Server-side)
  * VERSION: v0.2.9-fix-model-case
- * BUILD: 2025-12-20_0115_fix-case-sensitivity
+ * BUILD: 2025-12-20_0120_fix-case-sensitivity
  * * 【修正内容】
  * - GitHub連携は成功を確認。
  * - AIモデル名の判定を「大文字・小文字区別なし」に修正し、Unknown Modelエラーを解決。
