@@ -1,1185 +1,1733 @@
+<!--
+  APP: AI Strategy Room
+  FILE: index.html (Client-side)
+  VERSION: v5.12.2-stable
+  BUILD: 2025-12-23_2209_fix
+  AUTHOR: Rex (HEIC/PDF対応 + 自動圧縮・完全版)
+  
+  TITLE: HEIC/PDF対応 + 自動圧縮・完全版 (v5.12.2)
+  DATE(JST): 2025-12-23 22:09 JST
+  
+  CHANGES:
+  - Base (なべさん→Rex): v5.10.0-fixedUIを基準に運用バグ修正
+  - BuildParam/表示ヘッダの不整合を解消 (なべさん→Rex): バージョン情報を統一
+  - 選択転送モードで「全員」を押すと落ちる可能性を潰す (なべさん→Rex): agent==="all"の場合、3カラムに複製
+  - ローディングバーの完了判定を修正 (なべさん→Rex): 3固定→動的（送信数に応じて）
+  - 履歴削除ボタンのdisabled対策 (なべさん→Rex): pointer-events制御で二重クリック防止
+  - tryStartNewSession()のコメント修正 (なべさん→Rex): 実装と一致
+  
+  BuildParam(b): ?b=2025-12-23_2209_fix
+  DebugParam: &debug=1
+  POLICY: v5.10.0の見た目を維持しつつ、運用バグを修正
+-->
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
-  <base target="_top">
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
   <title>AI Strategy Room</title>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet">
+  <!-- PDF.js for PDF to image conversion -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script>
+    // PDF.js worker設定（必須）
+    if (typeof pdfjsLib !== 'undefined') {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+    }
+  </script>
+  <!-- heic2any for HEIC/HEIF to JPG conversion -->
+  <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
   <style>
-    :root{
-      --bg:#f5f7fb;
-      --panel:#ffffff;
-      --text:#111827;
-      --muted:#6b7280;
-      --line:#e5e7eb;
+    /* 基本設定 */
+    :root { 
+      --bg-color: #f3f4f6; 
+      --card-bg: #ffffff; 
+      --text-color: #333333; 
+      --accent-color: #50C878;
+      --fontScale: 1.0; /* 文字サイズ倍率（1.0 = 100%, 1.1 = 110%, ...） */
+      --base: 14px; /* 基準フォントサイズ */
+    }
+    body { 
+      background-color: var(--bg-color); 
+      font-family: 'Helvetica Neue', Arial, sans-serif; 
+      color: var(--text-color); 
+      font-size: calc(var(--base) * var(--fontScale));
+    }
+    /* ★修正：すべての要素でフォントサイズをinheritで統一★ */
+    input, textarea, button, .card, .card * { font-size: inherit; }
+    .container { max-width: 1600px; margin: 0 auto; padding: 20px; }
+    
+    /* ★1段目：最上段（段コンテナ限定でnowrap + overflow-x:auto）★ */
+    .tier-1 { 
+      display: flex; 
+      flex-wrap: nowrap;
+      justify-content: space-between; 
+      margin-bottom: 15px; 
+      align-items: center;
+      white-space: nowrap;
+      min-width: 100%;
+      overflow-x: auto;
+    }
+    .tier-1-left { display: flex; gap: 10px; align-items: center; }
+    .tier-1-right { display: flex; gap: 10px; align-items: center; }
+    
+    /* ヘッダー周り（v5.4.0互換） */
+    .settings-bar { display: flex; justify-content: space-between; margin-bottom: 15px; align-items: center; }
+    .btn-pill { 
+      padding: 0 20px; border-radius: 8px; border: 1px solid #ccc; font-weight: bold; cursor: pointer; 
+      display: flex; align-items: center; justify-content: center; 
+      background: #fff; color: #555; height: 45px; transition: 0.2s;
+    }
+    .btn-pill:hover { background: #f0f0f0; transform: translateY(-1px); box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
 
-      --yui:#ff4fa3;
-      --gemini:#7c3aed;
-      --rex:#8b5a2b;
-
-      --btn:#111827;
-      --btnText:#ffffff;
-
-      --ok:#059669;
-      --ng:#dc2626;
-
-      --qaScale: 1;           /* Q/A文字倍率 */
-      --qaBase: 14px;        /* 基本文字 */
+    /* ★2段目：アプリ名称＋バージョン＋ビルド番号★ */
+    .tier-2 { 
+      display: flex; 
+      flex-wrap: nowrap;
+      justify-content: space-between; 
+      margin-bottom: 10px;
+      white-space: nowrap;
+      min-width: 100%;
+      overflow-x: auto;
     }
 
-    body{
-      margin:0;
-      background:var(--bg);
-      color:var(--text);
-      font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans JP", sans-serif;
+    /* 入力エリア */
+    .input-card { background: var(--card-bg); padding: 25px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); margin-bottom: 30px; }
+    
+    /* ★3段目：タイトル入力欄★ */
+    .title-input { display: block; width: 100%; padding: 12px; margin-bottom: 15px; border: 2px solid #e5e7eb; border-radius: 8px; font-weight: bold; color: #333; }
+    
+    /* ★4段目：本文入力欄★ */
+    textarea { width: 100%; height: 120px; padding: 15px; border: 2px solid #e5e7eb; border-radius: 8px; resize: vertical; line-height: 1.6; }
+    
+    /* ★5段目：画像操作エリア（枠で囲う、段コンテナ限定でnowrap + overflow-x:auto）★ */
+    .tier-5 { 
+      display: flex; 
+      flex-wrap: nowrap;
+      gap: 10px; 
+      align-items: center; 
+      margin-top: 15px; 
+      padding: 15px; 
+      border: 2px solid #e5e7eb; 
+      border-radius: 8px; 
+      background: #f9fafb;
+      white-space: nowrap;
+      min-width: 100%;
+      overflow-x: auto;
     }
+    .screenshot-msg { font-size: 0.9rem; color: #d97706; font-weight: bold; background: #fff8e1; border: 1px solid #fae0b5; padding: 4px 10px; border-radius: 6px; }
 
-    .wrap{
-      max-width: 1120px;
-      margin: 0 auto;
-      padding: 18px 14px 32px;
+    /* ツールバー（v5.4.0互換） */
+    .sub-tools { display: flex; gap: 10px; align-items: center; margin-top: 15px; flex-wrap: wrap; }
+
+    /* ★6段目：From/To/実行（段コンテナ限定でnowrap + overflow-x:auto）★ */
+    .tier-6 { 
+      display: flex; 
+      flex-wrap: nowrap;
+      gap: 20px; 
+      align-items: center; 
+      margin-top: 20px; 
+      border-top: 1px solid #eee; 
+      padding-top: 20px;
+      white-space: nowrap;
+      min-width: 100%;
+      overflow-x: auto;
     }
+    .cmd-group { display: flex; gap: 10px; align-items: center; }
+    .cmd-label { font-weight: bold; font-size: 1rem; color: #555; }
+    
+    .proxy-select { padding: 0 15px; height: 45px; border-radius: 8px; border: 1px solid #ccc; background: #fff; font-weight: bold; cursor: pointer; font-size: 1rem; }
 
-    .topbar{
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap:12px;
-      padding: 12px 14px;
-      background:var(--panel);
-      border:1px solid var(--line);
-      border-radius: 14px;
+    /* AI選択ボタン (トグル式) */
+    .btn-ai { 
+      border: none; transition: all 0.2s; height: 45px; border-radius: 8px; padding: 0 25px; 
+      font-weight: bold; cursor: pointer; background: #e0e0e0; color: #777; font-size: 1rem;
     }
-    .title{ font-weight:700; font-size:18px; line-height:1.2; }
-    .sub{ margin-top:4px; font-size:12px; color:var(--muted); }
-
-    .rightTools{
-      display:flex;
-      align-items:center;
-      gap:10px;
-      flex-wrap:wrap;
-      justify-content:flex-end;
+    .btn-all.active { background-color: #1f2937; color: white; box-shadow: 0 4px 8px rgba(0,0,0,0.2); }
+    .btn-yui.active { background-color: #ec4899; color: white; box-shadow: 0 4px 8px rgba(236,72,153,0.3); }
+    .btn-gemini.active { background-color: #8b5cf6; color: white; box-shadow: 0 4px 8px rgba(139,92,246,0.3); }
+    .btn-rex.active { background-color: #d97706; color: white; box-shadow: 0 4px 8px rgba(217,119,6,0.3); }
+    
+    /* 質問/Discussボタン */
+    .btn-question { 
+      background-color: #3b82f6; 
+      color: white; 
+      border: none; 
+      padding: 0 30px; 
+      height: 50px; 
+      border-radius: 10px; 
+      font-weight: bold; 
+      font-size: 1.1rem; 
+      box-shadow: 0 4px 10px rgba(59, 130, 246, 0.3); 
+      cursor: pointer; 
+      transition: 0.2s;
     }
-
-    select, button{ font-size: 14px; }
-    button{ cursor:pointer; user-select:none; }
-
-    .btn{
-      border:1px solid var(--line);
-      background:#fff;
-      color:var(--text);
-      border-radius:10px;
-      padding: 9px 12px;
+    .btn-question:hover { background-color: #2563eb; transform: translateY(-2px); }
+    
+    .btn-discuss { 
+      background-color: var(--accent-color); color: white; border: none; padding: 0 40px; 
+      height: 50px; border-radius: 10px; font-weight: bold; font-size: 1.1rem; 
+      box-shadow: 0 4px 10px rgba(80, 200, 120, 0.3); cursor: pointer; transition: 0.2s;
     }
-    .btn:hover{ filter:brightness(0.98); }
+    .btn-discuss:hover { background-color: #43a047; transform: translateY(-2px); }
 
-    .chip{
-      font-size: 11px;
-      color:var(--muted);
-      border:1px solid var(--line);
-      border-radius: 999px;
+    /* コマンドバー (v5.4.0互換) */
+    .command-bar { display: flex; flex-wrap: wrap; gap: 20px; align-items: center; margin-top: 20px; border-top: 1px solid #eee; padding-top: 20px; }
+
+    /* ★7段目：3カラム固定（幅を崩さない）★ */
+    .chat-grid { 
+      display: grid; 
+      grid-template-columns: repeat(3, minmax(0, 1fr)); /* ★修正：minmax(0, 1fr)で固定★ */
+      gap: 25px; 
+    }
+    .column { 
+      background: #fff; border-radius: 15px; padding: 20px; 
+      border-top: 8px solid #ccc; min-height: 600px; 
+      box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+      min-width: 0; /* ★修正：これが無いと長文で列が広がる★ */
+    }
+    /* AIごとのカラー */
+    .col-yui { border-color: #ec4899; } 
+    .col-gemini { border-color: #8b5cf6; } 
+    .col-rex { border-color: #d97706; }
+    .col-header { font-size: 1.2rem; font-weight: bold; margin-bottom: 15px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+
+    /* カード表示仕様 */
+    .turn-group { 
+      border: 1px solid #e5e7eb; 
+      border-radius: 12px; 
+      background: #fff; 
+      overflow: hidden; 
+      margin-bottom: 25px; 
+      position: relative;
+      min-width: 0; /* ★修正：長文で列が広がらない★ */
+    }
+    /* ★修正：カード本文：URLや長文で横に伸びない★ */
+    .turn-group, .turn-group * { 
+      overflow-wrap: anywhere; 
+      word-break: break-word; 
+    }
+    .turn-group pre, .turn-group code { 
+      white-space: pre-wrap; 
+      overflow-x: auto; 
+    }
+    .turn-group img { 
+      max-width: 100%; 
+      height: auto; 
+      display: block; 
+    }
+    .question-part { 
+      background: #f0fdf4; 
+      border-bottom: 1px solid #eee; 
+      padding: 15px; 
+      color: #444; 
+      border-left: 5px solid var(--accent-color);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .answer-part { 
+      padding: 20px; 
+      line-height: 1.7; 
+      color: #333; 
+    }
+    /* ★修正：折りたたみ時、先頭2行は必ず表示★ */
+    .card-collapsed .answer-part { 
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .card-toggle { 
+      cursor: pointer; 
+      color: #666; 
+      user-select: none;
+      margin-left: 10px;
       padding: 2px 8px;
-      white-space:nowrap;
-      background:#fff;
+      border-radius: 4px;
+      background: #f0f0f0;
+      font-size: inherit;
     }
-
-    .panel{
-      margin-top:12px;
-      background:var(--panel);
-      border:1px solid var(--line);
-      border-radius: 14px;
-      padding: 14px;
+    .card-toggle:hover { background: #e0e0e0; }
+    .card-delete { 
+      cursor: pointer; 
+      color: #dc2626; 
+      margin-left: 10px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: #fee2e2;
+      font-size: inherit;
+      font-weight: bold;
     }
-
-    .label{
-      font-size:12px;
-      color:var(--muted);
-      margin-bottom:6px;
+    .card-delete:hover { background: #fecaca; }
+    .card-actions { 
+      display: flex; 
+      gap: 10px; 
+      padding: 10px 15px; 
+      border-top: 1px solid #eee; 
+      background: #f9fafb;
+      flex-wrap: wrap;
     }
-
-    textarea{
-      width:100%;
-      min-height: 120px;
-      resize: vertical;
-      border:1px solid var(--line);
-      border-radius: 12px;
-      padding: 12px;
-      font-size: 15px;
-      line-height: 1.55;
-      outline: none;
-      background:#fff;
-      box-sizing:border-box;
+    .card-action-btn { 
+      padding: 5px 15px; 
+      border-radius: 6px; 
+      border: 1px solid #ccc; 
+      background: #fff; 
+      cursor: pointer; 
+      font-size: 0.9rem;
     }
-
-    .row{
-      display:flex;
-      gap: 10px;
-      align-items:center;
-      flex-wrap:wrap;
-    }
-    .rowBetween{
-      display:flex;
-      justify-content:space-between;
-      align-items:flex-end;
-      gap:10px;
-      flex-wrap:wrap;
-    }
-
-    /* AI選択（アウトライン→選択時は塗り） */
-    .agentBtn{
-      background:#fff;
-      border:2px solid var(--line);
-      color:var(--text);
-      font-weight:800;
-      padding: 10px 14px;
-      border-radius: 12px;
-      min-width: 74px;
-      text-align:center;
-      transition: transform .06s ease, filter .12s ease;
-    }
-    .agentBtn:active{ transform: translateY(1px); }
-
-    .agentBtn.all{
-      background: #fff;
-      border-color: var(--line);
-      color: var(--text);
-    }
-
-    /* デフォルト状態：色付き（選択機能オフ） */
-    .agentBtn.yui{ background: var(--yui); color:#fff; }
-    .agentBtn.gemini{ background: var(--gemini); color:#fff; }
-    .agentBtn.rex{ background: var(--rex); color:#fff; }
-    .agentBtn.all{ 
-      background: var(--btn);
-      border-color: var(--btn);
-      color: var(--btnText);
-    }
-
-    /* 選択状態（is-selected）：アウトラインで色表示（選択機能オン） */
-    .agentBtn.is-selected.yui{ 
-      background: #fff;
-      border-color: var(--yui); 
-      color: var(--yui); 
-    }
-    .agentBtn.is-selected.gemini{ 
-      background: #fff;
-      border-color: var(--gemini); 
-      color: var(--gemini); 
-    }
-    .agentBtn.is-selected.rex{ 
-      background: #fff;
-      border-color: var(--rex); 
-      color: var(--rex); 
-    }
-    .agentBtn.is-selected.all{ 
-      background: #fff;
-      border-color: var(--line);
-      color: var(--text);
-    }
-
-    .btnDiscuss{
-      background: #16a34a;
-      border:2px solid #16a34a;
-      color:#fff;
-      font-weight:900;
-      padding: 10px 16px;
-      border-radius: 12px;
-      min-width: 92px;
-    }
-    .btnDiscuss:disabled{ opacity:.55; cursor:not-allowed; }
-
-    /* サムネ */
-    .thumbs{
-      display:flex;
-      flex-wrap:wrap;
-      gap:8px;
-      margin-top:10px;
-    }
-    .imgPreviewItem{ position: relative; }
-    .imgPreview{
-      width: 120px;
-      height: 120px;
-      object-fit: cover;
-      border:1px solid var(--line);
-      border-radius: 8px;
-      background:#fff;
-    }
-    .removeBtn{
-      position: absolute;
-      top: -8px;
-      right: -8px;
-      background: var(--ng);
-      color: white;
-      border: none;
-      border-radius: 50%;
-      width: 24px;
-      height: 24px;
-      font-size: 14px;
-      line-height: 1;
-    }
-    .badge{
-      position:absolute;
-      left:6px;
-      bottom:6px;
-      background: rgba(0,0,0,.65);
-      color:#fff;
-      font-size:10px;
-      padding:2px 6px;
-      border-radius:999px;
-    }
-
-    .msg{
-      margin-top: 10px;
-      padding: 10px 12px;
-      border-radius: 12px;
-      border:1px solid var(--line);
-      background:#fff;
-      display:none;
-      font-size: 13px;
-      line-height: 1.5;
-    }
-    .msg.info{ display:block; border-color:#bfdbfe; background:#eff6ff; color:#1e3a8a; }
-    .msg.warn{ display:block; border-color:#fed7aa; background:#fff7ed; color:#7c2d12; }
-    .msg.err{ display:block; border-color:#fecaca; background:#fef2f2; color:#7f1d1d; }
-
-    .apiBox{
-      margin-top: 10px;
-      padding: 10px 12px;
-      border-radius: 12px;
-      border:1px solid var(--line);
-      background:#fff;
-      display:none;
-      font-size: 13px;
-      line-height:1.55;
-    }
-
-    /* 出力カード */
-    .grid{
-      margin-top: 12px;
-      display:grid;
-      grid-template-columns: repeat(3, minmax(220px, 1fr));
-      gap: 12px;
-    }
-    .card{
-      background:var(--panel);
-      border:2px solid var(--line);
-      border-radius: 16px;
-      padding: 12px;
-      min-height: 240px;
-      display:flex;
-      flex-direction:column;
-      gap:10px;
-    }
-
-    .cardHead{
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap:8px;
-      font-weight:800;
-    }
-
-    /* 枠色（固定HEX） */
-    .yuiFrame{ border-color: #ff9ecc; }
-    .geminiFrame{ border-color: #b89df6; }
-    .rexFrame{ border-color: #c4a87d; }
-
-    /* Q/A */
-    .qa{
-      border:1px solid var(--line);
-      border-radius: 12px;
-      padding: 10px;
-      background:#fff;
-    }
-    .qaRow{
-      display:flex;
-      gap:10px;
-      align-items:flex-start;
-      padding: 6px 0;
-    }
-    .qaRow + .qaRow{
-      border-top:1px dashed var(--line);
-    }
-    .qaTag{
-      width:22px;
-      height:22px;
-      border-radius:999px;
-      border:1px solid var(--line);
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      font-size:12px;
-      color:var(--muted);
-      flex:0 0 auto;
-      background:#fff;
-    }
-    .qaText{
-      white-space: pre-wrap;
-      line-height: 1.55;
-      font-size: calc(var(--qaBase) * var(--qaScale));
-      flex:1;
-      color: var(--text);
-    }
-    .qaText.muted{ color: var(--muted); }
-    
-    /* ユーザー入力とAI回答の視覚的区別 */
-    .userInput{
-      font-weight: 700;
-      color: #2563eb;
-    }
-    .aiTime{
-      font-weight: 900;
-      color: var(--text);
-      font-size: calc(var(--qaBase) * var(--qaScale) * 1.1);
-    }
-    .aiResponse{
-      color: var(--text);
+    .card-image { 
+      max-width: 100%; 
+      margin: 10px 0; 
+      border-radius: 8px; 
     }
     
-    /* 太文字のスタイル */
-    strong.aiTime{
-      font-weight: 900;
-      color: var(--text);
+    /* 吹き出しデザイン（v5.4.0互換） */
+    .turn-group-old { border: 1px solid #e5e7eb; border-radius: 12px; background: #fff; overflow: hidden; margin-bottom: 25px; }
+    .question-part-old { background: #f0fdf4; border-bottom: 1px solid #eee; padding: 15px; font-size: 0.95rem; color: #444; border-left: 5px solid var(--accent-color); }
+    .answer-part-old { padding: 20px; font-size: 1.05rem; line-height: 1.7; color: #333; }
+    
+    /* モーダル */
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; justify-content: center; align-items: center; z-index: 999999; }
+    /* ★修正：確認ダイアログは最前面に表示★ */
+    #customConfirmModal { z-index: 9999999 !important; }
+    .modal-content { background: #fff; width: 90%; max-width: 800px; max-height: 80vh; border-radius: 12px; padding: 25px; display: flex; flex-direction: column; }
+    .log-list { overflow-y: auto; flex-grow: 1; }
+    .log-item { 
+      padding: 15px; 
+      border-bottom: 1px solid #eee; 
+      cursor: pointer; 
+      transition: 0.1s; 
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    } 
+    .log-item:hover { background: #f9f9f9; }
+    .log-item-delete { 
+      color: #dc2626; 
+      cursor: pointer; 
+      margin-left: 10px;
+      padding: 5px 10px;
+      border-radius: 4px;
+    }
+    .log-item-delete:hover { background: #fee2e2; }
+    
+    /* テーマカラー選択・文字サイズ選択 */
+    .theme-select, .font-size-select { 
+      padding: 0 15px; 
+      height: 45px; 
+      border-radius: 8px; 
+      border: 1px solid #ccc; 
+      background: #fff; 
+      font-weight: bold; 
+      cursor: pointer; 
+      font-size: 0.9rem;
+    }
+    
+    /* コード表示モーダル */
+    .code-modal { 
+      background: #1e293b; 
+      color: #e2e8f0; 
+      padding: 20px; 
+      border-radius: 8px; 
+      max-height: 70vh; 
+      overflow-y: auto; 
+      font-family: 'Courier New', monospace;
     }
 
-    /* 転送ボタン（カード下） */
-    .forwardRow{
-      margin-top:auto;
-      display:flex;
-      align-items:center;
-      gap:8px;
-      flex-wrap:wrap;
-      padding-top:10px;
-      border-top:1px dashed var(--line);
+    /* ★レスポンシブ設定 (スマホ用)★ */
+    @media (max-width: 1280px) {
+      body { font-size: 15px; }
+      .container { padding: 10px; }
+      
+      /* グリッドを1列に変更 */
+      .chat-grid { grid-template-columns: 1fr; gap: 30px; }
+      
+      /* 各種バーを縦積みに */
+      .settings-bar, .command-bar, .sub-tools, .tier-1, .tier-5, .tier-6 { flex-direction: column; align-items: stretch; gap: 10px; white-space: normal; overflow-x: visible; }
+      .header-left, .header-right, .cmd-group { flex-direction: column; align-items: stretch; width: 100%; }
+      
+      /* ボタンを押しやすく大きく */
+      .btn-pill, .btn-ai, .proxy-select, .btn-discuss, .btn-question { height: 50px; width: 100%; margin: 0; justify-content: center; font-size: 1.1rem; }
+      .cmd-group { margin: 0 !important; }
     }
-    .labelTiny{
-      font-size:11px;
-      color:var(--muted);
-      margin-right:6px;
-    }
-    .miniBtn{
-      border:2px solid var(--line);
-      background:#fff;
-      color:var(--text);
-      border-radius:999px;
-      padding: 6px 10px;
-      font-weight:800;
-      font-size:12px;
-    }
-    .miniBtn.yui{ border-color: var(--yui); color: var(--yui); }
-    .miniBtn.gemini{ border-color: var(--gemini); color: var(--gemini); }
-    .miniBtn.rex{ border-color: var(--rex); color: var(--rex); }
-
-    .miniBtn:active{ transform: translateY(1px); }
-
-    @media (max-width: 920px){
-      .grid{ grid-template-columns: 1fr; }
-    }
-
-    /* 昼/夜 */
-    body.night{
-      --bg:#0b1220;
-      --panel:#0f172a;
-      --text:#e5e7eb;
-      --muted:#94a3b8;
-      --line:#243041;
-      --btn:#111827;
-      --btnText:#e5e7eb;
-    }
-    body.night textarea{ background:#0b1220; color:#e5e7eb; }
-    body.night .apiBox, body.night .msg, body.night .qa{ background:#0b1220; }
-    body.night .chip{ background:#0b1220; }
-
-    /* スクショのフラッシュ */
-    #shotFlash{
-      position:fixed;
-      inset:0;
-      background:#fff;
-      opacity:0;
-      pointer-events:none;
-      transition: opacity .18s ease;
-      z-index:9999;
-    }
-    #shotFlash.on{ opacity:.35; }
   </style>
 </head>
 <body>
-  <div id="shotFlash"></div>
-
-  <div class="wrap">
-    <div class="topbar">
-      <div>
-        <div class="title">AI Strategy Room</div>
-        <div class="sub">
-          Ver: v0.2.9-code-sync
-        </div>
-      </div>
-      <div class="rightTools">
-        <select onchange="setTheme(this.value)">
-          <option value="light">昼 (見やすい)</option>
-          <option value="night">夜</option>
-        </select>
-
-        <button class="btn" onclick="fontMinus()">A-</button>
-        <span class="chip" id="fontPct">100%</span>
-        <button class="btn" onclick="fontPlus()">A+</button>
-
-        <button onclick="togglePing()">API Check</button>
-        <button class="btn" onclick="clearConversationDisplay()" title="会話履歴をクリア">履歴クリア</button>
-      </div>
+<div class="container">
+  <!-- ★1段目：最上段★ -->
+  <div class="tier-1">
+    <div class="tier-1-left">
+      <button class="btn-pill" onclick="openHistoryModal()">📂 過去ログ</button>
+      <div id="saveStatus" style="display:flex; align-items:center; color:#50C878; font-weight:bold; margin:0 10px;">自動保存 -</div>
+      <button class="btn-pill" onclick="tryStartNewSession()">🔄 会議リセット</button>
     </div>
-
-    <div id="pingResult" class="apiBox"></div>
-
-    <div class="panel">
-      <div class="label">テーマ (ここはログにも残ります)</div>
-      <div class="label" style="font-size:0.8rem; color: #2563eb;">※ @code full index.html などでコードを参照できます</div>
-      <textarea id="userInput" placeholder="テーマを入力（例：バグ修正の方針について）"></textarea>
-
-      <div style="margin-top:10px;">
-        <div class="label">画像(URL不要。ここで直接選びます/スクショもOK) - 最大10枚まで</div>
-        <div class="row">
-          <input type="file" id="fileInput" accept="image/*" multiple>
-          <button class="btn" onclick="clearImages()">クリア</button>
-          <button class="btn" onclick="captureScreenshot()">📷 スクショ</button>
-        </div>
-
-        <div class="rowBetween" style="margin-top:10px;">
-          <div class="row">
-            <div class="label" style="margin-bottom:0; margin-right:8px;">AI選択:</div>
-            <button type="button" class="agentBtn all" data-agent="all" onclick="toggleAgent('all')">全員</button>
-            <button type="button" class="agentBtn yui" data-agent="yui" onclick="toggleAgent('yui')">Yui</button>
-            <button type="button" class="agentBtn gemini" data-agent="gemini" onclick="toggleAgent('gemini')">GEMINI</button>
-            <button type="button" class="agentBtn rex" data-agent="rex" onclick="toggleAgent('rex')">Rex</button>
-          </div>
-          <button class="btnDiscuss" id="sendBtn" onclick="runDiscuss()">🚀 DISCUSS</button>
-        </div>
-
-        <div id="thumbs" class="thumbs"></div>
-      </div>
-
-      <div id="status" class="msg info" style="display:none;"></div>
-    </div>
-
-    <div class="grid">
-      <div class="card yuiFrame" data-ai="yui">
-        <div class="cardHead">
-          <span>🤍 Yui</span>
-          <span class="chip" id="time-yui" style="display:none;"></span>
-        </div>
-        <div class="qa">
-          <div class="qaRow"><span class="qaTag">Q</span><div id="q-yui" class="qaText muted">-</div></div>
-          <div class="qaRow"><span class="qaTag">A</span><div id="a-yui" class="qaText muted">-</div></div>
-        </div>
-        <div class="forwardRow">
-          <span class="labelTiny">この回答を送る:</span>
-          <button class="miniBtn gemini" onclick="forwardAnswer('yui','gemini')">→ Gemini</button>
-          <button class="miniBtn rex" onclick="forwardAnswer('yui','rex')">→ Rex</button>
-        </div>
-      </div>
-
-      <div class="card geminiFrame" data-ai="gemini">
-        <div class="cardHead">
-          <span>✨ Gemini</span>
-          <span class="chip" id="time-gemini" style="display:none;"></span>
-        </div>
-        <div class="qa">
-          <div class="qaRow"><span class="qaTag">Q</span><div id="q-gemini" class="qaText muted">-</div></div>
-          <div class="qaRow"><span class="qaTag">A</span><div id="a-gemini" class="qaText muted">-</div></div>
-        </div>
-        <div class="forwardRow">
-          <span class="labelTiny">この回答を送る:</span>
-          <button class="miniBtn yui" onclick="forwardAnswer('gemini','yui')">→ Yui</button>
-          <button class="miniBtn rex" onclick="forwardAnswer('gemini','rex')">→ Rex</button>
-        </div>
-      </div>
-
-      <div class="card rexFrame" data-ai="rex">
-        <div class="cardHead">
-          <span>🦁 Rex</span>
-          <span class="chip" id="time-rex" style="display:none;"></span>
-        </div>
-        <div class="qa">
-          <div class="qaRow"><span class="qaTag">Q</span><div id="q-rex" class="qaText muted">-</div></div>
-          <div class="qaRow"><span class="qaTag">A</span><div id="a-rex" class="qaText muted">-</div></div>
-        </div>
-        <div class="forwardRow">
-          <span class="labelTiny">この回答を送る:</span>
-          <button class="miniBtn yui" onclick="forwardAnswer('rex','yui')">→ Yui</button>
-          <button class="miniBtn gemini" onclick="forwardAnswer('rex','gemini')">→ Gemini</button>
-        </div>
-      </div>
+    <div class="tier-1-right">
+      <button class="btn-pill" onclick="openManualModal()">❓ 説明書</button>
+      <button class="btn-pill" onclick="openAdvanceModal()">⚙️ Advance</button>
+      <select id="themeSelect" class="theme-select" onchange="setTheme(this.value)">
+        <option value="standard">テーマ: 標準</option>
+        <option value="navy">テーマ: Navy</option>
+        <option value="dark">テーマ: Dark</option>
+      </select>
+      <select id="fontSizeSelect" class="font-size-select" onchange="setFontSize(this.value)">
+        <option value="100">文字: 100%</option>
+        <option value="110">文字: 110%</option>
+        <option value="120">文字: 120%</option>
+        <option value="130">文字: 130%</option>
+        <option value="140">文字: 140%</option>
+        <option value="150">文字: 150%</option>
+      </select>
     </div>
   </div>
 
-  <script>
-    // ===== 設定 =====
-    const UI_VERSION = "v0.2.9-code-sync";
-    const MAX_IMAGES = 10;
-    const AI_LIST = ["yui","gemini","rex"];
-    const AI_LABEL = { yui:"Yui", gemini:"Gemini", rex:"Rex" };
+  <!-- ★2段目：アプリ名称＋バージョン＋ビルド番号★ -->
+  <div class="input-card">
+    <div class="tier-2">
+      <div style="font-size:1.2rem; font-weight:bold; color:#444;">AI Strategy Room <span style="font-size:0.8rem; background:#eee; padding:2px 6px; border-radius:4px;" id="appVersion">v5.12.2-stable</span> <span style="font-size:0.7rem; color:#999;" id="buildInfo">Build: <span id="buildId">2025-12-23_2209_fix</span></span></div>
+      <div id="clock" style="color:#888; font-weight:bold;"></div>
+    </div>
 
-    // ===== 状態 =====
-    let images = []; // {id, kind:'file'|'shot', file?:File, base64, mime, name, createdAt}
-    let selectedAgents = new Set(); // 初期は誰も選択していない（全部色が付いた状態 = 非選択）
+    <!-- ★3段目：タイトル入力欄★ -->
+    <input type="text" id="topicTitle" class="title-input" placeholder="タイトル（未入力の場合はAIが内容から自動生成します）">
     
-    // ★会話履歴管理（API用）
-    let conversationHistory = {
-      yui: [],   // [{ role: 'user'|'assistant'|'model', content: '...' }, ...]
-      rex: [],   // 直近10往復まで保持
-      gemini: [] // 古いものから削除
-    };
-    let roomSharedHistory = []; // 直近3ラウンド分（短めテキスト）
-    const MAX_HISTORY_PER_AI = 10; // AIごとの最大履歴数
-    const MAX_SHARED_ROUNDS = 3;   // 共有ログの最大ラウンド数
+    <!-- ★4段目：本文入力欄★ -->
+    <textarea id="themeInput" placeholder="ここに議題や相談内容を入力してください... (画像をCtrl+Vで貼り付け可能)"></textarea>
+
+    <!-- ★5段目：画像操作エリア（枠で囲う）★ -->
+    <div class="tier-5">
+      <input type="file" id="fileInput" multiple accept="image/*,.heic,.heif,application/pdf,.pdf" style="display:none" onchange="handleFileSelect(event)">
+      <button class="btn-pill" onclick="document.getElementById('fileInput').click()">📷 画像選択</button>
+      <span class="screenshot-msg">✂️ スクショ説明</span>
+      <button class="btn-pill" onclick="pasteFromClipboard()">📋 スクショ貼付け</button>
+      <button class="btn-pill" onclick="resetInputArea()">🧹 入力内容クリア</button>
+      <div id="previewArea" style="display:flex; gap:5px; margin-left:10px;"></div>
+    </div>
+
+    <!-- ★6段目：From/To/実行★ -->
+    <div class="tier-6">
+      <div class="cmd-group">
+        <span class="cmd-label">From:</span>
+        <select id="speakerSelect" class="proxy-select">
+          <option value="User">🙋‍♂️ 自分 (User)</option>
+          <option value="Yui">♥ Yui</option>
+          <option value="Gemini">♦ Gemini</option>
+          <option value="Rex">♠ Rex</option>
+        </select>
+      </div>
+
+      <div class="cmd-group" style="flex-grow:1; justify-content:center;">
+        <span class="cmd-label">To:</span>
+        <button class="btn-ai btn-all" id="btn-all" onclick="handleAgentClick('all', event)">全員</button>
+        <button class="btn-ai btn-yui" id="btn-yui" onclick="handleAgentClick('yui', event)">Yui</button>
+        <button class="btn-ai btn-gemini" id="btn-gemini" onclick="handleAgentClick('gemini', event)">Gemini</button>
+        <button class="btn-ai btn-rex" id="btn-rex" onclick="handleAgentClick('rex', event)">Rex</button>
+      </div>
+
+      <div class="cmd-group" style="margin-left:auto;">
+        <button class="btn-question" onclick="startQuestion()">質問</button>
+        <button class="btn-discuss" onclick="startDiscuss()">Discuss</button>
+      </div>
+    </div>
+    <div id="loadingBar" style="height:4px; width:100%; background:linear-gradient(90deg, #ec4899, #8b5cf6, #50C878); display:none; margin-top:10px;"></div>
+  </div>
+
+  <!-- ★7段目：3カラム固定★ -->
+  <div class="chat-grid">
+    <div class="column col-yui">
+      <div class="col-header" style="color:#ec4899"><span>♥</span> Yui (Secretary)</div>
+      <div id="hist-yui"></div>
+    </div>
+    <div class="column col-gemini">
+      <div class="col-header" style="color:#8b5cf6"><span>♦</span> Gemini (Analyst)</div>
+      <div id="hist-gemini"></div>
+    </div>
+    <div class="column col-rex">
+      <div class="col-header" style="color:#d97706"><span>♠</span> Rex (Red Team)</div>
+      <div id="hist-rex"></div>
+    </div>
+  </div>
+</div>
+
+<div id="customConfirmModal" class="modal-overlay"><div class="modal-content" style="width:400px; height:auto; text-align:center;"><p id="confirmMessage" style="margin-bottom:20px; font-weight:bold;"></p><div style="display:flex; justify-content:center; gap:10px;"><button id="confirmYesBtn" class="btn-pill" style="background:#0b1020; color:white;">OK</button><button id="confirmCancelBtn" class="btn-pill">Cancel</button></div></div></div>
+<div id="customAlertModal" class="modal-overlay"><div class="modal-content" style="width:400px; height:auto; text-align:center;"><p id="alertMessage" style="margin-bottom:20px; font-weight:bold;"></p><button onclick="closeAlertModal()" class="btn-pill">OK</button></div></div>
+<div id="historyModal" class="modal-overlay"><div class="modal-content"><div style="display:flex;justify-content:space-between;margin-bottom:10px;"><h2>📂 過去ログ一覧（最新10件）</h2><button onclick="closeHistoryModal()" style="font-size:1.5rem;">&times;</button></div><div id="logListContainer" class="log-list"></div></div></div>
+<div id="manualModal" class="modal-overlay"><div class="modal-content"><div style="display:flex;justify-content:space-between;margin-bottom:10px;"><h2>❓ 説明書</h2><button onclick="closeManualModal()" style="font-size:1.5rem;">&times;</button></div><div style="padding:15px; line-height:1.8;"><h3>基本操作</h3><p><strong>1. From選択:</strong> 発言者を選びます（基本は自分でOK）。<br><strong>2. To選択:</strong> 話したいAIを選びます（複数可）。色はON/OFFを表します。<br><strong>3. 質問:</strong> 通常の送信ボタンです。<br><strong>4. Discuss:</strong> 3AIで自動会話を回すボタンです。</p><h3>便利機能</h3><p>・画像の貼り付け(Ctrl+V)に対応しています。<br>・範囲選択転送：本文や回答でカーソル範囲選択中にAI選択ボタンを押すと、選択部分だけを指定AIへ転送できます。<br>・ブラウザを閉じても内容は一時保存されます。</p></div></div></div>
+<div id="advanceModal" class="modal-overlay"><div class="modal-content"><div style="display:flex;justify-content:space-between;margin-bottom:10px;"><h2>⚙️ Advance</h2><button onclick="closeAdvanceModal()" style="font-size:1.5rem;">&times;</button></div><div style="padding:15px; line-height:1.8;"><p>設計図読み込み等の機能はここに入れる想定です。</p></div></div></div>
+<div id="codeModal" class="modal-overlay"><div class="modal-content"><div style="display:flex;justify-content:space-between;margin-bottom:10px;"><h2>📝 コード表示</h2><button onclick="closeCodeModal()" style="font-size:1.5rem;">&times;</button></div><div id="codeContent" class="code-modal"></div></div></div>
+<div id="screenshotModal" class="modal-overlay"><div class="modal-content"><div style="display:flex;justify-content:space-between;margin-bottom:10px;"><h2>📷 スクショ（画像添付）</h2><button onclick="closeScreenshotModal()" style="font-size:1.5rem;">&times;</button></div><div style="padding:15px;"><input type="file" id="cardImageInput" multiple accept="image/*,.heic,.heif,application/pdf,.pdf" style="display:none" onchange="handleCardImageSelect(event)"><button class="btn-pill" onclick="document.getElementById('cardImageInput').click()">画像を選択</button><div id="cardImagePreview" style="margin-top:10px;"></div></div></div></div>
+
+<script>
+  // ===== 設定 =====
+  // ★版情報一元化：Code.gsから注入される値を使用（手打ちしない）★
+  const APP_VERSION = "<?= APP_VERSION ?>" || "v5.12.2-stable"; // フォールバック
+  const BUILD_ID = "<?= BUILD_ID ?>" || "2025-12-23_2209_fix"; // フォールバック
+  const AUTHOR = "<?= AUTHOR ?>" || "Rex (HEIC/PDF対応 + 自動圧縮・完全版)";
+  const BUILD_JST = "<?= BUILD_JST ?>" || "2025-12-23 22:09 JST";
+  
+  // ★版情報一元化：URLパラメータからb（配布用）を読み取る★
+  const urlParams = new URLSearchParams(window.location.search);
+  const urlBuildId = urlParams.get('b');
+  const isDebug = urlParams.get('debug') === '1';
+  const currentBuildId = urlBuildId || BUILD_ID; // URLのbがあればそれ優先
+  
+  // ===== 状態 =====
+  let selectedAgents = new Set(); // 空セット = 全員選択状態
+  let imagesBase64 = [];
+  let historyData = { perAIHistory: { yui: [], gemini: [], rex: [] } };
+  let sessionId = "SESS_" + new Date().getTime();
+  const STORAGE_KEY = 'ai_room_v5_stable';
+  const MAX_DISPLAY_PER_AI = 50; // 各AIの表示履歴は最大50件
+  let cardCounter = 0; // カードID用カウンター
+  let answerCardCount = { yui: 0, gemini: 0, rex: 0 }; // 回答カードカウンター（折りたたみ判定用）
+  let currentScreenshotCardId = null; // スクショボタン用のカードID
+  
+  // テーマカラー設定
+  const themes = {
+    standard: { bg: '#f3f4f6', card: '#ffffff', text: '#333333', accent: '#50C878' },
+    navy: { bg: '#1e3a5f', card: '#2d4a6b', text: '#e2e8f0', accent: '#60a5fa' },
+    dark: { bg: '#1a1a1a', card: '#2d2d2d', text: '#e5e5e5', accent: '#50C878' }
+  };
+  
+  window.onload = function() {
+    // バージョン情報を表示
+    const appVersionEl = document.getElementById('appVersion');
+    const buildIdEl = document.getElementById('buildId');
     
-    // UI表示用履歴（ユイUI形式）
-    let histories = { yui:[], gemini:[], rex:[] }; // {t, q, a}
-
-    // 文字倍率
-    let qaScale = 1;
-
-    // 起動
-    window.addEventListener('DOMContentLoaded', () => {
-      document.getElementById('fileInput').addEventListener('change', onFilePicked);
-      applyFontScale();
-      // 初期状態を設定（全て非選択状態 = アウトラインで色が表示されている状態）
-      updateAgentButtons();
-      updateSelectedTimeChips();
-      // 会話履歴を復元（localStorageから）
-      loadConversationDisplay();
-      // Drive権限チェック（あっても無くても動く）
-      try{
-        google.script.run
-          .withSuccessHandler(()=>{})
-          .withFailureHandler(()=>{})
-          .checkDriveAuth();
-      }catch(e){}
-    });
+    // ★版情報一元化：debug=1のときだけ右上に表示★
+    if (isDebug) {
+      const debugInfo = document.createElement('div');
+      debugInfo.id = 'debugVersionInfo';
+      debugInfo.style.cssText = 'position:fixed; top:10px; right:10px; background:#fff; border:2px solid #50C878; padding:8px 12px; border-radius:6px; font-size:11px; z-index:999999; box-shadow:0 2px 8px rgba(0,0,0,0.2);';
+      debugInfo.innerHTML = `<div style="font-weight:bold; color:#50C878; margin-bottom:4px;">DEBUG MODE</div><div>v${APP_VERSION}</div><div style="font-size:10px; color:#666;">b=${currentBuildId}</div>`;
+      document.body.appendChild(debugInfo);
+    }
+    if(appVersionEl) appVersionEl.textContent = APP_VERSION;
+    if(buildIdEl) buildIdEl.textContent = currentBuildId; // URLのbがあればそれ優先
     
-    // ページを離れる前に会話履歴を保存
-    window.addEventListener('beforeunload', () => {
-      saveConversationDisplay();
-    });
-
-    // ===== テーマ切り替え =====
-    function setTheme(mode) {
-      if(mode === 'night') document.body.classList.add('night');
-      else document.body.classList.remove('night');
+    updateClock(); 
+    setInterval(updateClock, 60000);
+    updateButtonsVisual();
+    // ★修正：handlePaste未定義エラーを回避（貼り付けはpasteFromClipboard()に統一）★
+    loadHistoryFromStorage();
+    loadSettings();
+  };
+  
+  // 時計更新（自動保存日時も更新）
+  function updateClock() {
+    const now = new Date();
+    const timeStr = now.toLocaleString('ja-JP', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
+    document.getElementById('clock').innerText = timeStr;
+    
+    // 自動保存日時を更新
+    const saveStatusEl = document.getElementById('saveStatus');
+    if(saveStatusEl) {
+      saveStatusEl.textContent = `自動保存 ${timeStr}`;
     }
-
-    // ===== 文字サイズ（Q/Aのみ） =====
-    function applyFontScale(){
-      document.documentElement.style.setProperty('--qaScale', String(qaScale));
-      document.getElementById('fontPct').textContent = Math.round(qaScale*100) + "%";
-    }
-    function fontMinus(){
-      qaScale = Math.max(0.85, Math.round((qaScale - 0.1)*100)/100);
-      applyFontScale();
-    }
-    function fontPlus(){
-      qaScale = Math.min(1.6, Math.round((qaScale + 0.1)*100)/100);
-      applyFontScale();
-    }
-
-    // ===== AI選択（複数選択） =====
-    function toggleAgent(agent){
-      if(agent === "all"){
-        // 全員ボタン：全員選択状態にする
-        selectedAgents = new Set(AI_LIST);
-        updateAgentButtons();
-        updateSelectedTimeChips();
+  }
+  
+  // ★範囲選択転送対応：selectionchangeで常に最後の選択文字列を保持★
+  let lastSelectedText = null; // 最後の選択文字列を保持
+  let lastSelectedCard = null; // 最後の選択カードを保持
+  
+  // ★修正：selectionchangeイベントで常に選択範囲を更新（選択が空になった瞬間に必ずクリア）★
+  document.addEventListener('selectionchange', () => {
+    const selection = window.getSelection();
+    try {
+      // ★修正：選択が空になった瞬間に必ずクリア（誤爆防止）★
+      if(selection.rangeCount === 0 || selection.toString().trim().length === 0) {
+        lastSelectedText = null;
+        lastSelectedCard = null;
         return;
       }
-
-      // 個別AIボタン：押したら選択にする（トグル）
+      
+      // 選択がある場合のみ保持
+      const range = selection.getRangeAt(0);
+      const selectedText = selection.toString().trim();
+      if(selectedText && selectedText.length > 0) {
+        lastSelectedText = selectedText;
+        lastSelectedCard = range.commonAncestorContainer.nodeType === 3 
+          ? range.commonAncestorContainer.parentElement.closest('.turn-group')
+          : range.commonAncestorContainer.closest('.turn-group');
+      } else {
+        // 選択が空の場合は保持しない（誤爆防止）
+        lastSelectedText = null;
+        lastSelectedCard = null;
+      }
+    } catch(e) {
+      // エラー時は保持しない
+      lastSelectedText = null;
+      lastSelectedCard = null;
+    }
+  });
+  
+  // ★範囲選択転送対応：エージェント選択（通常クリックで選択部分を転送）★
+  function handleAgentClick(agent, event) {
+    // ★修正：保持された選択範囲を使用（selectionchangeで常に更新済み）★
+    if(lastSelectedText && lastSelectedText.length > 0) {
+      // 選択範囲がある場合：転送処理
+      event.preventDefault();
+      event.stopPropagation();
+      
+      // 保持された選択範囲を使用
+      const selectedText = lastSelectedText;
+      const card = lastSelectedCard;
+      
+      let sourceTitle = '選択範囲';
+      if(card) {
+        const header = card.querySelector('.question-part');
+        if(header) {
+          sourceTitle = header.textContent.split('(')[0].trim();
+        }
+      }
+      
+      // ★修正：選択転送モードで「全員」を押すと落ちる可能性を潰す★
+      const now = new Date();
+      const timeStr = now.toLocaleString('ja-JP', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
+      
+      // agent==="all"の場合は、yui/gemini/rexの3カラムそれぞれに転送カードを複製
+      const targetAgents = (agent === 'all') ? ['yui', 'gemini', 'rex'] : [agent];
+      
+      targetAgents.forEach(targetAgent => {
+        const targetDiv = document.getElementById('hist-'+targetAgent);
+        if(!targetDiv) return; // 念のためnullチェック
+        
+        const transferCardId = 'card-selection-' + Date.now() + '-' + targetAgent;
+        
+        const transferCard = `
+          <div class="turn-group" id="${transferCardId}">
+            <div class="question-part">
+              <div><strong>転送元: ${sourceTitle}</strong> (${timeStr})</div>
+              <div>
+                <span class="card-delete" onclick="deleteCard('${transferCardId}')" title="削除">×</span>
+              </div>
+            </div>
+            <div class="answer-part">
+              ${selectedText.replace(/\n/g, '<br>')}
+            </div>
+            <div class="card-actions">
+              <button class="card-action-btn" onclick="screenshotCard('${transferCardId}')">📷 スクショ</button>
+              <button class="card-action-btn" onclick="clearCardContent('${transferCardId}')">🧹 内容クリア</button>
+              <button class="card-action-btn" onclick="showTransferPanel('${transferCardId}')">転送</button>
+            </div>
+            <div id="transfer-panel-${transferCardId}" style="display:none; padding:10px; background:#f9fafb; border-top:1px solid #eee;">
+              <textarea id="transfer-edit-${transferCardId}" style="width:100%; min-height:60px; margin-bottom:10px; padding:8px; border:1px solid #ccc; border-radius:4px;">${selectedText}</textarea>
+              <div style="display:flex; gap:10px;">
+                <button class="card-action-btn btn-yui" onclick="executeTransfer('${transferCardId}', 'yui')">To Yui</button>
+                <button class="card-action-btn btn-gemini" onclick="executeTransfer('${transferCardId}', 'gemini')">To Gemini</button>
+                <button class="card-action-btn btn-rex" onclick="executeTransfer('${transferCardId}', 'rex')">To Rex</button>
+                <button class="card-action-btn" onclick="hideTransferPanel('${transferCardId}')">キャンセル</button>
+              </div>
+            </div>
+          </div>
+        `;
+        
+        targetDiv.insertAdjacentHTML('afterbegin', transferCard);
+        limitHistory(targetAgent);
+      });
+      
+      // 選択範囲をクリア
+      const selection = window.getSelection();
+      if(selection.rangeCount > 0) {
+        selection.removeAllRanges();
+      }
+      lastSelectedText = null; // 保持した選択範囲をクリア（誤爆防止）
+      lastSelectedCard = null;
+      return;
+    }
+    
+    // 選択範囲がない場合：保持をクリア
+    lastSelectedText = null;
+    lastSelectedCard = null;
+    
+    // 選択範囲がない場合：通常のトグル処理
+    toggleAgent(agent);
+  }
+  
+  // エージェント選択（空セット＝全員に統一）
+  function toggleAgent(agent) {
+    if(agent==='all') {
+      selectedAgents = new Set(); // 空セット = 全員選択状態
+    } else {
       if(selectedAgents.has(agent)) {
-        // 既に選択されている場合は非選択に
         selectedAgents.delete(agent);
       } else {
-        // 選択されていない場合は選択に
         selectedAgents.add(agent);
       }
-
-      // 3つ選択した時点で全員選択状態になり、各ボタンは非選択状態に戻る
       if(selectedAgents.size === 3){
-        selectedAgents = new Set(); // 全員選択状態 = 誰も選択していない状態
+        selectedAgents = new Set(); // 全員選択状態 = 空セット
       }
-
-      updateAgentButtons();
-      updateSelectedTimeChips();
     }
-
-    function updateAgentButtons(){
-      const allBtn = document.querySelector('.agentBtn.all');
-      const yuiBtn = document.querySelector('.agentBtn.yui');
-      const gemBtn = document.querySelector('.agentBtn.gemini');
-      const rexBtn = document.querySelector('.agentBtn.rex');
-
-      const isAll = (selectedAgents.size === 0); // 誰も選択していない = 全員選択状態
-
-      // 全員ボタン：全員選択時（誰も選択していない時）は非選択状態（色付き、選択機能オフ）
-      allBtn.classList.toggle('is-selected', isAll);
-
-      // 個別AIボタン：選択されているAIはアウトライン（is-selected = 選択機能オン）、非選択は色付き（選択機能オフ）
-      yuiBtn.classList.toggle('is-selected', selectedAgents.has('yui'));
-      gemBtn.classList.toggle('is-selected', selectedAgents.has('gemini'));
-      rexBtn.classList.toggle('is-selected', selectedAgents.has('rex'));
-    }
-
-    function updateSelectedTimeChips(){
-      AI_LIST.forEach(ai=>{
-        const chip = document.getElementById('time-'+ai);
-        // 「選んだAIだけ」時刻を見せる
-        chip.style.display = selectedAgents.has(ai) ? 'inline-flex' : 'none';
+    updateButtonsVisual();
+  }
+  
+  function updateButtonsVisual() {
+    const agents = ['yui', 'gemini', 'rex'];
+    const isAll = (selectedAgents.size === 0);
+    const all = document.getElementById('btn-all');
+    if(isAll) all.classList.add('active');
+    else all.classList.remove('active');
+    
+    agents.forEach(a => {
+      const btn = document.getElementById('btn-'+a);
+      if(selectedAgents.has(a)) btn.classList.add('active');
+      else btn.classList.remove('active');
+    });
+  }
+  
+  // 質問ボタン（通常送信）
+  function startQuestion() {
+    const theme = document.getElementById('themeInput').value;
+    const title = document.getElementById('topicTitle').value;
+    
+    if(!theme && imagesBase64.length===0) return showCustomAlert("内容を入力してください");
+    
+    const targets = selectedAgents.size === 0 ? ['yui', 'gemini', 'rex'] : Array.from(selectedAgents);
+    if(targets.length===0) return showCustomAlert("AIを選択してください");
+    
+    // ★修正：ローディングバーの完了判定を動的に（送信数に応じて）★
+    loadingPending = targets.length;
+    document.getElementById('loadingBar').style.display = 'block';
+    const speaker = document.getElementById('speakerSelect').value;
+    const finalTheme = (speaker !== "User") ? `【${speaker}からの発言】\n${theme}` : theme;
+    
+    google.script.run.logUserAction(sessionId, theme, title);
+    
+    targets.forEach(agent => {
+      sendToAI(agent, finalTheme, title, speaker, theme);
+    });
+    
+    document.getElementById('themeInput').value = "";
+    imagesBase64 = [];
+    document.getElementById('previewArea').innerHTML = "";
+  }
+  
+  // Discussボタン（3AIで自動会話）
+  function startDiscuss() {
+    const theme = document.getElementById('themeInput').value;
+    const title = document.getElementById('topicTitle').value;
+    
+    if(!theme && imagesBase64.length===0) return showCustomAlert("内容を入力してください");
+    
+    // ★修正：ローディングバーの完了判定を動的に（送信数に応じて）★
+    const discussAgents = ['yui', 'gemini', 'rex'];
+    loadingPending = discussAgents.length;
+    document.getElementById('loadingBar').style.display = 'block';
+    const speaker = document.getElementById('speakerSelect').value;
+    
+    // ★修正：Discuss専用のプロンプト（3AI会話を回す）★
+    const discussPrompt = `【Discussモード：3AIで自動会話を開始します】\n\n${theme}`;
+    const finalTheme = (speaker !== "User") ? `【${speaker}からの発言】\n${discussPrompt}` : discussPrompt;
+    
+    google.script.run.logUserAction(sessionId, theme, title);
+    
+    // ★修正：3AI全員に送信（Discuss専用の流れ）★
+    discussAgents.forEach(agent => {
+      sendToAI(agent, finalTheme, title || 'Discuss会話', speaker, theme);
+    });
+    
+    document.getElementById('themeInput').value = "";
+    imagesBase64 = [];
+    document.getElementById('previewArea').innerHTML = "";
+  }
+  
+  // AIへ送信処理
+  function sendToAI(agent, finalTheme, title, speaker, originalTheme) {
+    const div = document.getElementById('hist-'+agent);
+    const cardId = 'card-' + Date.now() + '-' + (cardCounter++);
+    
+    // 質問カードを追加
+    const questionCard = createQuestionCard(cardId, speaker, title || originalTheme.substring(0, 50), originalTheme, imagesBase64);
+    div.insertAdjacentHTML('afterbegin', questionCard);
+    
+    // ★修正：折りたたみボタンの表示判定★
+    checkCardCollapse(cardId);
+    
+    // 履歴肥大対策
+    limitHistory(agent);
+    
+    // AIへ送信
+    google.script.run
+      .withSuccessHandler(res => {
+        const answerCardId = 'card-answer-' + cardId;
+        answerCardCount[agent]++; // 回答カードカウンターを増やす
+        const isFirstAnswer = (answerCardCount[agent] === 1);
+        const answerCard = createAnswerCard(answerCardId, agent, res.response, res.status === 'success', isFirstAnswer);
+        const questionCardEl = document.getElementById(cardId);
+        if(questionCardEl) {
+          questionCardEl.insertAdjacentHTML('afterend', answerCard);
+          // ★修正：折りたたみボタンの表示判定★
+          checkCardCollapse(answerCardId);
+        }
+        limitHistory(agent);
+        // ★修正：履歴データを更新（会話の継続性のため）★
+        if(!historyData.perAIHistory[agent]) historyData.perAIHistory[agent] = [];
+        historyData.perAIHistory[agent].push(
+          { role: 'user', content: finalTheme },
+          { role: 'assistant', content: res.response }
+        );
+        saveHistoryToStorage();
+        showAutoSave();
+        checkDone();
+      })
+      .withFailureHandler(e => {
+        const answerCardId = 'card-answer-' + cardId;
+        answerCardCount[agent]++;
+        const isFirstAnswer = (answerCardCount[agent] === 1);
+        // ★修正：Geminiエラーも確実に表示（沈黙禁止、HTTP 429対応）★
+        // ★版情報一元化：エラーメッセージ末尾に版情報を付与★
+        const versionInfo = ` (${APP_VERSION} / b=${currentBuildId})`;
+        let errorMsg = "System Error: " + (e.message || '不明なエラーが発生しました') + versionInfo;
+        if(agent === 'gemini') {
+          let errorDetail = e.message || '不明なエラーが発生しました';
+          let shortMsg = '⚠️ **Gemini Error**';
+          
+          // HTTP 429（Quota）の場合は短い日本語に整形
+          if(errorDetail.includes('429') || errorDetail.includes('Quota') || errorDetail.includes('quota')) {
+            shortMsg = '⚠️ **Gemini利用上限に達しました**\n\nAPIの利用上限（クオータ）に達しています。しばらく待ってから再試行してください。' + versionInfo;
+          } else {
+            shortMsg = `⚠️ **Gemini Error**: ${errorDetail}\n\n【確認事項】\n1. GEMINI_API_KEY または GOOGLE_API_KEY が設定されているか\n2. APIキーに権限があるか\n3. ネットワーク接続が正常か` + versionInfo;
+          }
+          errorMsg = shortMsg;
+        }
+        const answerCard = createAnswerCard(answerCardId, agent, errorMsg, false, isFirstAnswer);
+        const questionCardEl = document.getElementById(cardId);
+        if(questionCardEl) {
+          questionCardEl.insertAdjacentHTML('afterend', answerCard);
+          // ★修正：折りたたみボタンの表示判定★
+          checkCardCollapse(answerCardId);
+        }
+        // ★修正：履歴データを更新（会話の継続性のため）★
+        if(!historyData.perAIHistory[agent]) historyData.perAIHistory[agent] = [];
+        historyData.perAIHistory[agent].push(
+          { role: 'user', content: finalTheme }
+        );
+        checkDone();
+      })
+      .runRelay(finalTheme, title, imagesBase64, agent, historyData, sessionId);
+  }
+  
+  // 質問カード作成
+  function createQuestionCard(cardId, speaker, title, content, images) {
+    const now = new Date();
+    const timeStr = now.toLocaleString('ja-JP', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
+    
+    let imageHtml = '';
+    if(images && images.length > 0) {
+      images.forEach(img => {
+        imageHtml += `<img src="${img}" class="card-image" alt="添付画像">`;
       });
     }
-
-    // ===== API Check =====
-    function togglePing() {
-      const el = document.getElementById('pingResult');
-      if (el.style.display === 'block') { el.style.display = 'none'; return; }
-
-      el.style.display = 'block';
-      el.textContent = "Checking connection...";
-      google.script.run
-        .withSuccessHandler(res => {
-          el.innerHTML = `Success!<br>Keys: Yui=${res.keys?.yui?"OK":"NG"}, Rex=${res.keys?.rex?"OK":"NG"}, Gemini=${res.keys?.gemini?"OK":"NG"}`;
-        })
-        .withFailureHandler(err => { el.textContent = "Ping Error: " + err.message; })
-        .testPing();
-    }
-
-    // ===== 画像：ファイル選択 =====
-    function onFilePicked(){
-      const files = Array.from(document.getElementById('fileInput').files || []);
-      // 既存のfile画像だけ消す（スクショは残す）
-      images = images.filter(x => x.kind !== 'file');
-
-      const room = MAX_IMAGES - images.length;
-      const useFiles = files.slice(0, Math.max(0, room));
-
-      if(files.length > useFiles.length){
-        showStatus(`画像は最大${MAX_IMAGES}枚です。超えた分は読み込みません。`, 'warn');
+    
+    // ★修正：2行超のときだけ折りたたみボタンを表示（レンダ後に判定）★
+    return `
+      <div class="turn-group" id="${cardId}">
+        <div class="question-part">
+          <div><strong>${speaker}</strong>: ${title} (${timeStr})</div>
+          <div>
+            <span class="card-toggle" id="toggle-${cardId}" style="display:none;" onclick="toggleCard('${cardId}')" title="折りたたみ">[折りたたむ]</span>
+            <span class="card-delete" onclick="deleteCard('${cardId}')" title="削除">×</span>
+          </div>
+        </div>
+        <div class="answer-part" id="content-${cardId}">
+          ${content.replace(/\n/g, '<br>')}
+          ${imageHtml}
+        </div>
+        <div class="card-actions">
+          <button class="card-action-btn" onclick="screenshotCard('${cardId}')">📷 スクショ</button>
+          <button class="card-action-btn" onclick="clearCardContent('${cardId}')">🧹 内容クリア</button>
+          <button class="card-action-btn" onclick="showTransferPanel('${cardId}')">転送</button>
+        </div>
+        <div id="transfer-panel-${cardId}" style="display:none; padding:10px; background:#f9fafb; border-top:1px solid #eee;">
+          <textarea id="transfer-edit-${cardId}" style="width:100%; min-height:60px; margin-bottom:10px; padding:8px; border:1px solid #ccc; border-radius:4px;">${content.replace(/\n/g, '\n')}</textarea>
+          <div style="display:flex; gap:10px;">
+            <button class="card-action-btn btn-yui" onclick="executeTransfer('${cardId}', 'yui')">To Yui</button>
+            <button class="card-action-btn btn-gemini" onclick="executeTransfer('${cardId}', 'gemini')">To Gemini</button>
+            <button class="card-action-btn btn-rex" onclick="executeTransfer('${cardId}', 'rex')">To Rex</button>
+            <button class="card-action-btn" onclick="hideTransferPanel('${cardId}')">キャンセル</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+  
+  // 回答カード作成
+  // ★版情報一元化：AI返信カードのヘッダ行に｜vX.Y.Zを追加★
+  function createAnswerCard(cardId, agent, content, isSuccess, isFirstAnswer) {
+    const now = new Date();
+    const timeStr = now.toLocaleString('ja-JP', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
+    const agentName = agent === 'yui' ? 'Yui' : agent === 'gemini' ? 'Gemini' : 'Rex';
+    // ★版情報一元化：ヘッダ行に｜vX.Y.Zを追加（これが一番効く）★
+    const versionTag = `｜${APP_VERSION}`;
+    
+    // ★新機能：AI返答から「#### 追加/変更点」ブロックだけ抽出してカードに表示★
+    let displayContent = content;
+    try {
+      // 「#### 追加/変更点」ブロックを抽出
+      const changePointMatch = content.match(/####\s*追加[\/／]変更点[\s\S]*?(?=####|###|$)/i);
+      if (changePointMatch && changePointMatch[0]) {
+        // 抽出できた場合：その部分だけを表示
+        displayContent = changePointMatch[0]
+          .replace(/####\s*追加[\/／]変更点\s*/i, '#### 追加/変更点\n') // 統一
+          .replace(/\n{3,}/g, '\n\n') // 連続改行を調整
+          .trim();
+      } else {
+        // ★追加改善：見出しが取れない場合は先頭400-600文字だけを要約欄に出すフォールバック★
+        if(content.length > 400) {
+          displayContent = content.substring(0, 600);
+          if(content.length > 600) {
+            displayContent += '...';
+          }
+        }
       }
-
-      let pending = useFiles.length;
-      if(pending === 0){ renderThumbs(); return; }
-
-      useFiles.forEach(file=>{
-        const id = makeId();
-        const reader = new FileReader();
-        reader.onload = (e)=>{
-          images.push({
-            id, kind:'file', file,
-            base64: e.target.result,
-            mime: file.type || 'image/jpeg',
-            name: file.name || 'image',
-            createdAt: Date.now()
-          });
-          pending--;
-          if(pending === 0) renderThumbs();
-        };
-        reader.onerror = ()=>{
-          pending--;
-          if(pending === 0) renderThumbs();
-        };
-        reader.readAsDataURL(file);
-      });
+      // 抽出できない場合は全体表示（フェイルセーフ）
+    } catch (e) {
+      console.warn("追加/変更点抽出エラー: " + e.toString());
+      // エラー時も全体表示（フェイルセーフ）
     }
-
-    function clearImages(){
-      images = [];
-      document.getElementById('fileInput').value = '';
-      renderThumbs();
-      showStatus('画像をクリアしました', 'info');
+    
+    // コードブロックを検出して別画面へ逃がす（displayContentに対して処理）
+    let processedContent = displayContent;
+    const codeBlocks = [];
+    const codePattern = /```(\w+)?\n([\s\S]*?)```/g;
+    let match;
+    let codeIndex = 0;
+    
+    while((match = codePattern.exec(displayContent)) !== null) {
+      const codeId = `code-${cardId}-${codeIndex++}`;
+      codeBlocks.push({ id: codeId, lang: match[1] || '', code: match[2] });
+      processedContent = processedContent.replace(match[0], `<a href="#" onclick="showCode('${codeId}'); return false;" style="color:#3b82f6; text-decoration:underline;">[コードを表示]</a>`);
     }
-
-    function removeImage(id){
-      const removed = images.find(x=>x.id===id);
-      images = images.filter(x=>x.id!==id);
-
-      // fileInput側も再構築（fileだけ）
-      try{
-        const dt = new DataTransfer();
-        images.filter(x=>x.kind==='file' && x.file).forEach(x=>dt.items.add(x.file));
-        document.getElementById('fileInput').files = dt.files;
-      }catch(e){}
-
-      renderThumbs();
-      if(removed) showStatus(`削除しました: ${removed.kind==='shot'?'スクショ':'画像'}`, 'info');
+    
+    // ★修正：コードブロックを辞書形式で保存（showCodeで確実に取得できるように）★
+    if(codeBlocks.length > 0) {
+      window.__CODE_MAP = window.__CODE_MAP || {};
+      codeBlocks.forEach(cb => window.__CODE_MAP[cb.id] = cb);
     }
-
-    function renderThumbs(){
-      const box = document.getElementById('thumbs');
-      box.innerHTML = '';
-      images.forEach((img)=>{
-        const item = document.createElement('div');
-        item.className = 'imgPreviewItem';
-        item.innerHTML = `
-          <img src="${img.base64}" class="imgPreview" alt="thumb">
-          <button class="removeBtn" onclick="removeImage('${img.id}')" title="削除">×</button>
-          ${img.kind==='shot' ? `<div class="badge">SHOT</div>` : ``}
-        `;
-        box.appendChild(item);
-      });
+    
+    // Markdown整形（太字と改行のみ）
+    processedContent = processedContent.replace(/\n/g, '<br>').replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    
+    // ★修正：折りたたみ判定（2行超のときだけ折りたたみボタンを表示、折りたたみ時は先頭2行を表示）★
+    const isLong = processedContent.length > 200;
+    const shouldCollapse = !isFirstAnswer && isLong;
+    
+    return `
+      <div class="turn-group ${shouldCollapse ? 'card-collapsed' : ''}" id="${cardId}">
+        <div class="question-part" style="background:#f9fafb;">
+          <div><strong>${agentName}</strong> (${timeStr}) ${versionTag}</div>
+          <div>
+            <span class="card-toggle" id="toggle-${cardId}" style="display:none;" onclick="toggleCard('${cardId}')" title="折りたたみ">[${shouldCollapse ? '展開' : '折りたたむ'}]</span>
+            <span class="card-delete" onclick="deleteCard('${cardId}')" title="削除">×</span>
+          </div>
+        </div>
+        <div class="answer-part" id="content-${cardId}">
+          ${processedContent}
+        </div>
+        <div class="card-actions">
+          <button class="card-action-btn" onclick="screenshotCard('${cardId}')">📷 スクショ</button>
+          <button class="card-action-btn" onclick="clearCardContent('${cardId}')">🧹 内容クリア</button>
+          <button class="card-action-btn" onclick="showTransferPanel('${cardId}')">転送</button>
+        </div>
+        <div id="transfer-panel-${cardId}" style="display:none; padding:10px; background:#f9fafb; border-top:1px solid #eee;">
+          <textarea id="transfer-edit-${cardId}" style="width:100%; min-height:60px; margin-bottom:10px; padding:8px; border:1px solid #ccc; border-radius:4px;">${content.replace(/\n/g, '\n')}</textarea>
+          <div style="display:flex; gap:10px;">
+            <button class="card-action-btn btn-yui" onclick="executeTransfer('${cardId}', 'yui')">To Yui</button>
+            <button class="card-action-btn btn-gemini" onclick="executeTransfer('${cardId}', 'gemini')">To Gemini</button>
+            <button class="card-action-btn btn-rex" onclick="executeTransfer('${cardId}', 'rex')">To Rex</button>
+            <button class="card-action-btn" onclick="hideTransferPanel('${cardId}')">キャンセル</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+  
+  // ★修正：折りたたみボタンの表示判定（2行超のときだけ表示）★
+  // ★最優先バグ修正：card-collapsed状態のカードは測定せずにtoggleを表示★
+  function checkCardCollapse(cardId) {
+    const card = document.getElementById(cardId);
+    if(!card) return;
+    
+    const answerPart = card.querySelector('.answer-part');
+    if(!answerPart) return;
+    
+    const toggle = card.querySelector('.card-toggle');
+    if(!toggle) return;
+    
+    // ★最優先バグ修正：card-collapsedクラスがある場合は、測定せずにtoggleを表示★
+    // shouldCollapse === true の判定は既にcreateAnswerCard()で行われているため、測定は不要
+    if(card.classList.contains('card-collapsed')) {
+      toggle.style.display = 'inline-block';
+      return;
     }
-
-    // ===== スクショ（このページ内だけ） =====
-    function flashShot(){
-      const f = document.getElementById('shotFlash');
-      f.classList.add('on');
-      setTimeout(()=>f.classList.remove('on'), 180);
+    
+    // card-collapsedクラスがない場合のみ、scrollHeightで測定
+    const lineHeight = parseFloat(window.getComputedStyle(answerPart).lineHeight);
+    const maxHeight = lineHeight * 2.5; // 2.5行分の高さ
+    
+    if(answerPart.scrollHeight > maxHeight) {
+      // 2行超の場合：折りたたみボタンを表示
+      toggle.style.display = 'inline-block';
+    } else {
+      // 2行以下の場合：折りたたみボタンを非表示
+      toggle.style.display = 'none';
+      // 折りたたみ状態を解除
+      card.classList.remove('card-collapsed');
     }
-
-    function loadScriptOnce(url, testGlobal){
-      return new Promise((resolve, reject)=>{
-        if(testGlobal && window[testGlobal]) return resolve();
-        const existed = Array.from(document.scripts).some(s=>s.src===url);
-        if(existed){
-          // 読み込み待ち
-          const t = setInterval(()=>{
-            if(testGlobal && window[testGlobal]){
-              clearInterval(t); resolve();
+  }
+  
+  // カード折りたたみ
+  function toggleCard(cardId) {
+    const card = document.getElementById(cardId);
+    if(card) {
+      card.classList.toggle('card-collapsed');
+      const toggle = card.querySelector('.card-toggle');
+      if(toggle) {
+        toggle.textContent = card.classList.contains('card-collapsed') ? '[展開]' : '[折りたたむ]';
+      }
+    }
+  }
+  
+  // カード削除
+  function deleteCard(cardId) {
+    const card = document.getElementById(cardId);
+    if(card) {
+      card.remove();
+      saveHistoryToStorage();
+    }
+  }
+  
+  // カード内容クリア
+  function clearCardContent(cardId) {
+    const card = document.getElementById(cardId);
+    if(card) {
+      const body = card.querySelector('.answer-part');
+      if(body) {
+        body.innerHTML = '<em>（内容をクリアしました）</em>';
+      }
+    }
+  }
+  
+  // ★修正：カード転送パネル表示（転送前に編集可能）★
+  function showTransferPanel(cardId) {
+    const panel = document.getElementById('transfer-panel-' + cardId);
+    if(!panel) return;
+    
+    const card = document.getElementById(cardId);
+    if(!card) return;
+    
+    const body = card.querySelector('.answer-part');
+    if(!body) return;
+    
+    const content = body.textContent || body.innerText;
+    const textarea = document.getElementById('transfer-edit-' + cardId);
+    if(textarea) {
+      textarea.value = content;
+    }
+    
+    panel.style.display = 'block';
+  }
+  
+  // ★修正：カード転送パネル非表示★
+  function hideTransferPanel(cardId) {
+    const panel = document.getElementById('transfer-panel-' + cardId);
+    if(panel) {
+      panel.style.display = 'none';
+    }
+  }
+  
+  // ★修正：カード転送実行（編集内容をAIへ送信）★
+  function executeTransfer(cardId, targetAgent) {
+    const card = document.getElementById(cardId);
+    if(!card) return;
+    
+    const textarea = document.getElementById('transfer-edit-' + cardId);
+    if(!textarea) return;
+    
+    const editedContent = textarea.value.trim();
+    if(!editedContent) {
+      showCustomAlert('転送内容が空です');
+      return;
+    }
+    
+    const header = card.querySelector('.question-part');
+    const title = header ? header.textContent.split('(')[0].trim() : '転送';
+    
+    // 転送元情報を取得
+    let sourceAgentName = '転送元';
+    // カードがどのカラムにあるか判定
+    const histYui = document.getElementById('hist-yui');
+    const histGemini = document.getElementById('hist-gemini');
+    const histRex = document.getElementById('hist-rex');
+    if(histYui && histYui.contains(card)) sourceAgentName = 'Yui';
+    else if(histGemini && histGemini.contains(card)) sourceAgentName = 'Gemini';
+    else if(histRex && histRex.contains(card)) sourceAgentName = 'Rex';
+    
+    // ★修正：転送パネルを閉じる★
+    hideTransferPanel(cardId);
+    
+    // ★修正：編集内容をAIへ送信（callAIを実行）★
+    // ★修正：ローディングバーの完了判定を動的に（送信数に応じて）★
+    loadingPending = 1;
+    document.getElementById('loadingBar').style.display = 'block';
+    const transferTitle = `【転送元】${sourceAgentName} / ${title}`;
+    const finalTheme = editedContent;
+    
+    // AIへ送信（質問カード→回答カードが生成される）
+    sendToAI(targetAgent, finalTheme, transferTitle, 'User', editedContent);
+  }
+  
+  // ★修正：コード表示（辞書形式で確実に取得）★
+  function showCode(codeId) {
+    const cb = window.__CODE_MAP && window.__CODE_MAP[codeId];
+    if(!cb) return;
+    
+    const codeContent = document.getElementById('codeContent');
+    if(codeContent) {
+      codeContent.textContent = cb.code;
+      document.getElementById('codeModal').style.display = 'flex';
+    }
+  }
+  
+  // ★スクショ機能：カードに画像添付可能にする★
+  function screenshotCard(cardId) {
+    currentScreenshotCardId = cardId;
+    document.getElementById('screenshotModal').style.display = 'flex';
+  }
+  
+  async function handleCardImageSelect(e) {
+    const cardId = currentScreenshotCardId;
+    if(!cardId) return;
+    
+    const card = document.getElementById(cardId);
+    if(!card) return;
+    
+    const body = card.querySelector('.answer-part');
+    if(!body) return;
+    
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+    
+    try {
+      const normalizedImages = await normalizeSelectedFiles(files);
+      
+      for (const dataUrl of normalizedImages) {
+        const img = document.createElement('img');
+        img.src = dataUrl;
+        img.className = 'card-image';
+        img.style.maxWidth = '100%';
+        img.style.margin = '10px 0';
+        img.style.borderRadius = '8px';
+        body.appendChild(img);
+      }
+    } catch (error) {
+      console.error('ファイル処理エラー:', error);
+      showCustomAlert(`ファイル処理に失敗しました: ${error.message}`);
+    }
+    
+    closeScreenshotModal();
+  }
+  
+  function closeScreenshotModal() {
+    document.getElementById('screenshotModal').style.display = 'none';
+    currentScreenshotCardId = null;
+    document.getElementById('cardImageInput').value = '';
+    document.getElementById('cardImagePreview').innerHTML = '';
+  }
+  
+  // 履歴制限
+  function limitHistory(agent) {
+    const histDiv = document.getElementById('hist-'+agent);
+    const cards = histDiv.querySelectorAll('.turn-group');
+    if(cards.length > MAX_DISPLAY_PER_AI) {
+      for(let i = cards.length - 1; i >= MAX_DISPLAY_PER_AI; i--) {
+        cards[i].remove();
+      }
+    }
+  }
+  
+  // ★修正：ローディングバーの完了判定を動的に（送信数に応じて）★
+  let loadingPending = 0;
+  function checkDone() {
+    loadingPending--;
+    if(loadingPending <= 0) {
+      document.getElementById('loadingBar').style.display = 'none';
+      loadingPending = 0;
+    }
+  }
+  
+  // ローカルストレージ保存
+  // ★版情報一元化：appVersion/buildIdをlocalStorageに保存★
+  function saveHistoryToStorage() {
+    ['yui', 'gemini', 'rex'].forEach(agent => {
+      limitHistory(agent);
+    });
+    
+    const data = {
+      yui: document.getElementById('hist-yui').innerHTML,
+      gemini: document.getElementById('hist-gemini').innerHTML,
+      rex: document.getElementById('hist-rex').innerHTML,
+      historyObj: historyData, 
+      sessionId: sessionId,
+      appVersion: APP_VERSION,
+      buildId: currentBuildId
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  }
+  
+  function showAutoSave() {
+    updateClock();
+  }
+  
+  function loadHistoryFromStorage() {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if(saved) {
+      const d = JSON.parse(saved);
+      document.getElementById('hist-yui').innerHTML = d.yui || "";
+      document.getElementById('hist-gemini').innerHTML = d.gemini || "";
+      document.getElementById('hist-rex').innerHTML = d.rex || "";
+      historyData = d.historyObj || { perAIHistory: { yui: [], gemini: [], rex: [] } };
+      sessionId = d.sessionId || "SESS_" + Date.now();
+      
+      // 回答カードカウンターをリセット
+      answerCardCount = { yui: 0, gemini: 0, rex: 0 };
+      ['yui', 'gemini', 'rex'].forEach(agent => {
+        const cards = document.getElementById('hist-'+agent).querySelectorAll('.turn-group');
+        cards.forEach(card => {
+          const header = card.querySelector('.question-part');
+          if(header && !header.textContent.includes('転送元')) {
+            const agentName = agent === 'yui' ? 'Yui' : agent === 'gemini' ? 'Gemini' : 'Rex';
+            if(header.textContent.includes(agentName)) {
+              answerCardCount[agent]++;
             }
-          }, 60);
-          setTimeout(()=>{ clearInterval(t); reject(new Error('script load timeout')); }, 5000);
+          }
+        });
+      });
+      
+      ['yui', 'gemini', 'rex'].forEach(agent => {
+        limitHistory(agent);
+      });
+    }
+  }
+  
+  // 設定保存・読み込み
+  function saveSettings() {
+    const settings = {
+      theme: document.getElementById('themeSelect').value,
+      fontSize: document.getElementById('fontSizeSelect').value
+    };
+    localStorage.setItem('ai_room_settings', JSON.stringify(settings));
+  }
+  
+  function loadSettings() {
+    const saved = localStorage.getItem('ai_room_settings');
+    if(saved) {
+      const settings = JSON.parse(saved);
+      if(settings.theme) {
+        document.getElementById('themeSelect').value = settings.theme;
+        setTheme(settings.theme);
+      }
+      if(settings.fontSize) {
+        document.getElementById('fontSizeSelect').value = settings.fontSize;
+        const scale = parseFloat(settings.fontSize) / 100;
+        document.documentElement.style.setProperty('--fontScale', scale.toString());
+      }
+    }
+  }
+  
+  // テーマ設定
+  function setTheme(themeName) {
+    const theme = themes[themeName] || themes.standard;
+    document.documentElement.style.setProperty('--bg-color', theme.bg);
+    document.documentElement.style.setProperty('--card-bg', theme.card);
+    document.documentElement.style.setProperty('--text-color', theme.text);
+    document.documentElement.style.setProperty('--accent-color', theme.accent);
+    saveSettings();
+  }
+  
+  // 文字サイズ設定
+  // ★修正：文字サイズ設定（--fontScaleで統一）★
+  function setFontSize(size) {
+    const scale = parseFloat(size) / 100; // 100% = 1.0, 110% = 1.1, ...
+    document.documentElement.style.setProperty('--fontScale', scale.toString());
+    saveSettings();
+  }
+  
+  // ★新機能：ファイルを正規化（PDF→JPG、HEIC→JPG、通常画像の圧縮）★
+  async function normalizeSelectedFiles(files) {
+    const normalizedImages = [];
+    
+    for (const file of files) {
+      try {
+        const fileType = file.type.toLowerCase();
+        const fileName = file.name.toLowerCase();
+        
+        // PDF処理
+        if (fileType === 'application/pdf' || fileName.endsWith('.pdf')) {
+          const pdfImages = await convertPdfToImages(file);
+          normalizedImages.push(...pdfImages);
+        }
+        // HEIC/HEIF処理
+        else if (fileName.endsWith('.heic') || fileName.endsWith('.heif') || fileType.includes('heic') || fileType.includes('heif')) {
+          const jpgImage = await convertHeicToJpg(file);
+          if (jpgImage) {
+            const compressed = await compressImage(jpgImage);
+            normalizedImages.push(compressed);
+          }
+        }
+        // 通常画像処理
+        else {
+          const compressed = await compressImageFile(file);
+          if (compressed) {
+            normalizedImages.push(compressed);
+          }
+        }
+      } catch (error) {
+        console.error('ファイル処理エラー:', error);
+        showCustomAlert(`ファイル "${file.name}" の処理に失敗しました: ${error.message}`);
+      }
+    }
+    
+    return normalizedImages;
+  }
+  
+  // PDFを画像に変換（1ページ目のみ）
+  async function convertPdfToImages(file) {
+    const images = [];
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    const maxPages = 1; // 1ページ目のみ
+    
+    for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
+      const page = await pdf.getPage(pageNum);
+      const viewport = page.getViewport({ scale: 2.0 }); // 解像度調整
+      
+      const canvas = document.createElement('canvas');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const context = canvas.getContext('2d');
+      
+      await page.render({ canvasContext: context, viewport: viewport }).promise;
+      
+      // CanvasをJPGに変換して圧縮
+      const jpgDataUrl = await compressCanvas(canvas);
+      images.push(jpgDataUrl);
+    }
+    
+    return images;
+  }
+  
+  // HEIC/HEIFをJPGに変換
+  async function convertHeicToJpg(file) {
+    try {
+      // heic2anyライブラリを使用
+      const blob = await heic2any({
+        blob: file,
+        toType: 'image/jpeg',
+        quality: 0.92
+      });
+      
+      // heic2anyは配列を返すことがある
+      const resultBlob = Array.isArray(blob) ? blob[0] : blob;
+      
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => resolve(e.target.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(resultBlob);
+      });
+    } catch (error) {
+      throw new Error(`HEIC変換エラー: ${error.message}`);
+    }
+  }
+  
+  // ファイルを画像として圧縮
+  async function compressImageFile(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const img = new Image();
+          img.onload = async () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            const compressed = await compressCanvas(canvas);
+            resolve(compressed);
+          };
+          img.onerror = reject;
+          img.src = e.target.result;
+        } catch (error) {
+          reject(error);
+        }
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+  
+  // 画像（dataURL）を圧縮
+  async function compressImage(dataUrl) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = async () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.width;
+          canvas.height = img.height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0);
+          const compressed = await compressCanvas(canvas);
+          resolve(compressed);
+        } catch (error) {
+          reject(error);
+        }
+      };
+      img.onerror = reject;
+      img.src = dataUrl;
+    });
+  }
+  
+  // Canvasを圧縮（Blobサイズ3.0MB以下に収める・toBlobベースで実バイト判定）
+  async function compressCanvas(canvas) {
+    const MAX_SIZE_MB = 3.0;
+    const MAX_SIZE_BYTES = MAX_SIZE_MB * 1024 * 1024;
+    const MAX_LONG_SIDE = 1600; // 長辺の最大値（UI解像感を壊さない範囲）
+    
+    let currentWidth = canvas.width;
+    let currentHeight = canvas.height;
+    let quality = 0.85;
+    
+    // 長辺を1600pxに縮小
+    if (currentWidth > MAX_LONG_SIDE || currentHeight > MAX_LONG_SIDE) {
+      const ratio = Math.min(MAX_LONG_SIDE / currentWidth, MAX_LONG_SIDE / currentHeight);
+      currentWidth = Math.floor(currentWidth * ratio);
+      currentHeight = Math.floor(currentHeight * ratio);
+      
+      const resizedCanvas = document.createElement('canvas');
+      resizedCanvas.width = currentWidth;
+      resizedCanvas.height = currentHeight;
+      const ctx = resizedCanvas.getContext('2d');
+      ctx.drawImage(canvas, 0, 0, currentWidth, currentHeight);
+      canvas = resizedCanvas;
+    }
+    
+    // 品質を段階的に下げながら圧縮（toBlobで実バイト判定）
+    const qualitySteps = [0.85, 0.75, 0.65, 0.55, 0.45, 0.35];
+    const sizeSteps = [1600, 1400, 1200, 1000, 800, 600]; // 長辺の縮小ステップ
+    
+    for (let step = 0; step < qualitySteps.length; step++) {
+      quality = qualitySteps[step];
+      
+      // 長辺をさらに縮小（必要に応じて）
+      if (step > 0 && (currentWidth > sizeSteps[step] || currentHeight > sizeSteps[step])) {
+        const ratio = Math.min(sizeSteps[step] / currentWidth, sizeSteps[step] / currentHeight);
+        currentWidth = Math.floor(currentWidth * ratio);
+        currentHeight = Math.floor(currentHeight * ratio);
+        
+        const resizedCanvas = document.createElement('canvas');
+        resizedCanvas.width = currentWidth;
+        resizedCanvas.height = currentHeight;
+        const ctx = resizedCanvas.getContext('2d');
+        ctx.drawImage(canvas, 0, 0, currentWidth, currentHeight);
+        canvas = resizedCanvas;
+      }
+      
+      // toBlobで実バイトサイズを取得
+      const blob = await new Promise((resolve) => {
+        canvas.toBlob(resolve, 'image/jpeg', quality);
+      });
+      
+      if (blob && blob.size <= MAX_SIZE_BYTES) {
+        // 実バイトサイズが3MB以下なら、dataURLに変換して返す
+        return new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onload = (e) => resolve(e.target.result);
+          reader.readAsDataURL(blob);
+        });
+      }
+    }
+    
+    // 最後まで圧縮しても大きい場合は、最低品質で返す
+    const finalBlob = await new Promise((resolve) => {
+      canvas.toBlob(resolve, 'image/jpeg', 0.3);
+    });
+    if (finalBlob) {
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = (e) => resolve(e.target.result);
+        reader.readAsDataURL(finalBlob);
+      });
+    }
+    
+    // フォールバック
+    return canvas.toDataURL('image/jpeg', 0.3);
+  }
+  
+  // 画像処理（新機能対応）
+  async function handleFileSelect(e) {
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+    
+    try {
+      const normalizedImages = await normalizeSelectedFiles(files);
+      
+      // 正規化された画像を追加
+      for (const dataUrl of normalizedImages) {
+        imagesBase64.push(dataUrl);
+        let img = document.createElement('img');
+        img.src = dataUrl; 
+        img.style.height="50px"; 
+        img.style.borderRadius="5px"; 
+        img.style.border="1px solid #ccc";
+        img.className = "card-image";
+        document.getElementById('previewArea').appendChild(img);
+      }
+    } catch (error) {
+      console.error('ファイル処理エラー:', error);
+      showCustomAlert(`ファイル処理に失敗しました: ${error.message}`);
+    }
+    
+    // ファイル選択をリセット（同じファイルを再選択できるように）
+    e.target.value = '';
+  }
+  
+  async function pasteFromClipboard() {
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        if (item.types.find(type => type.startsWith('image/'))) {
+          const blob = await item.getType(item.types.find(type => type.startsWith('image/')));
+          // クリップボードから取得した画像も圧縮
+          const compressed = await compressImageFile(new File([blob], 'clipboard.png', { type: blob.type }));
+          if (compressed) {
+            imagesBase64.push(compressed);
+            let img = document.createElement('img'); 
+            img.src = compressed; 
+            img.style.height="50px"; 
+            img.style.borderRadius="5px";
+            img.className = "card-image";
+            document.getElementById('previewArea').appendChild(img);
+          }
           return;
         }
-        const s = document.createElement('script');
-        s.src = url;
-        s.onload = ()=> resolve();
-        s.onerror = ()=> reject(new Error('script load failed'));
-        document.head.appendChild(s);
-      });
+      }
+      document.getElementById('themeInput').focus(); 
+      document.execCommand('paste');
+    } catch(e) { 
+      document.getElementById('themeInput').focus(); 
+      document.execCommand('paste'); 
     }
-
-    async function captureScreenshot(){
-      if(images.length >= MAX_IMAGES){
-        showStatus(`画像は最大${MAX_IMAGES}枚です。先に削除してね。`, 'warn');
-        return;
-      }
-      showStatus('スクリーンショットを撮影中（会議室画面のみ）...', 'info');
-
-      try{
-        await loadScriptOnce(
-          'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js',
-          'html2canvas'
-        );
-
-        const target = document.querySelector('.wrap');
-        const canvas = await html2canvas(target, {
-          backgroundColor: '#ffffff',
-          scale: 1,
-          logging: false,
-          useCORS: true
-        });
-
-        const base64 = canvas.toDataURL('image/png');
-        images.push({
-          id: makeId(),
-          kind:'shot',
-          base64,
-          mime:'image/png',
-          name:'screenshot.png',
-          createdAt: Date.now()
-        });
-        renderThumbs();
-        flashShot();
-        showStatus('スクショを追加しました（サムネ確認OK）', 'info');
-
-        // Drive保存は「できたら」だけ（失敗してもOK）
-        try{
-          google.script.run
-            .withSuccessHandler((url)=>{
-              if(url) showStatus('スクショ保存（Drive）: ' + url, 'info');
-            })
-            .withFailureHandler(()=>{})
-            .saveImageToDriveSafe("Screenshot", [{base64:base64, mime:'image/png'}]);
-        }catch(e){}
-
-      }catch(err){
-        showStatus('スクショに失敗: ' + err.message, 'err');
-      }
-    }
-
-    // ===== 実行：DISCUSS =====
-    function runDiscuss(){
-      const text = (document.getElementById('userInput').value || '').trim();
-      if(!text){
-        showStatus('テーマを入力してください', 'warn');
-        return;
-      }
-
-      // 誰も選択していない場合は全員選択として扱う
-      const targets = selectedAgents.size === 0 ? AI_LIST : Array.from(selectedAgents);
-
-      const btn = document.getElementById('sendBtn');
-      btn.disabled = true;
-      btn.textContent = "Thinking...";
-
-      showStatus(`Processing: ${targets.map(t=>AI_LABEL[t]).join(', ')} ...`, 'info');
-
-      // 画像処理（縮小して送る）
-      const payload = images.map(x=>({base64:x.base64, mime:x.mime}));
-      if(payload.length > 0){
-        showStatus(`Resizing Images (${payload.length}枚)...`, 'info');
-        processMultipleImages(payload, (processed)=>{
-          runForTargets(text, processed, targets, () => {
-            btn.disabled = false;
-            btn.textContent = "🚀 DISCUSS";
-          });
-        });
-      }else{
-        runForTargets(text, [], targets, () => {
-          btn.disabled = false;
-          btn.textContent = "🚀 DISCUSS";
+  }
+  
+  // リセット
+  function resetInputArea() {
+    document.getElementById('themeInput').value = "";
+    document.getElementById('topicTitle').value = "";
+    imagesBase64 = []; 
+    document.getElementById('previewArea').innerHTML = "";
+  }
+  
+  // ★修正：会議リセット（入力＋カラム履歴もクリア）★
+  function tryStartNewSession() {
+    showCustomConfirm("入力中の内容とカラム履歴を削除しますか？\n(シート保存ログは保持されます)", () => {
+      resetInputArea();
+      // ★修正：3カラムの表示カードもクリア（UI状態を初期化）★
+      document.getElementById('hist-yui').innerHTML = "";
+      document.getElementById('hist-gemini').innerHTML = "";
+      document.getElementById('hist-rex').innerHTML = "";
+      // 回答カードカウンターもリセット
+      answerCardCount = { yui: 0, gemini: 0, rex: 0 };
+      // 履歴データもクリア
+      historyData = { perAIHistory: { yui: [], gemini: [], rex: [] } };
+      // ストレージもクリア
+      localStorage.removeItem(STORAGE_KEY);
+    });
+  }
+  
+  // モーダル系
+  function openHistoryModal() {
+    document.getElementById('historyModal').style.display = 'flex';
+    google.script.run.withSuccessHandler(list => {
+      const c = document.getElementById('logListContainer'); 
+      c.innerHTML = "";
+      if(list.length===0) {
+        c.innerHTML = "<div style='padding:20px; color:#999;'>ログがありません</div>";
+      } else {
+        list.forEach(l => {
+          let d = document.createElement('div'); 
+          d.className="log-item";
+          d.innerHTML = `
+            <div>
+              <b>${l.time}</b> ${l.title}
+            </div>
+            <div>
+              <span class="log-item-delete" onclick="deleteLogItem('${l.id}', event)">削除</span>
+            </div>
+          `;
+          d.onclick = (e) => {
+            if(e.target.classList.contains('log-item-delete')) return;
+            document.getElementById('historyModal').style.display='none'; 
+            setTimeout(() => showCustomConfirm("このログを読み込みますか？\n(現在の画面は上書きされます)", () => {
+               google.script.run.withSuccessHandler(restoreSessionToUI).getSessionLogs(l.id);
+            }), 100);
+          };
+          c.appendChild(d);
         });
       }
-    }
-
-    function runForTargets(text, imagesArray, targets, done){
-      let pending = targets.length;
-
-      // 会話履歴ペイロードを構築
-      const historyPayload = {
-        perAIHistory: {
-          yui: conversationHistory.yui.slice(-MAX_HISTORY_PER_AI * 2),
-          rex: conversationHistory.rex.slice(-MAX_HISTORY_PER_AI * 2),
-          gemini: conversationHistory.gemini.slice(-MAX_HISTORY_PER_AI * 2)
-        },
-        roomSharedHistory: roomSharedHistory.slice(-MAX_SHARED_ROUNDS)
-      };
-
-      targets.forEach(ai=>{
-        // UI：Qを更新＆Thinking
-        setQA(ai, text, "Thinking...", true);
-
-        // targetを単一AI名に変換（'all'の場合は各AI名）
-        const target = ai;
-        
-        google.script.run
-          .withSuccessHandler((res)=>{
-            const ans = pickAnswer(ai, res);
-            setQA(ai, text, ans || '-', false);
-            stampTime(ai);
-            appendHistory(ai, text, ans || '-');
+    }).getLogList();
+  }
+  
+  // ★修正：過去ログ削除の安定化（削除中はボタン無効化、削除後に一覧再取得）★
+  function deleteLogItem(sessionId, event) {
+    event.stopPropagation();
+    
+    // ★修正：削除ボタンを無効化（連打防止）★
+    // <span>にdisabled=trueを付けても効かないので、pointer-events制御で二重クリック防止
+    // 無効化は「OK押下後」に移動（キャンセル時は何も変えない）
+    const deleteBtn = event.target;
+    const originalText = deleteBtn.textContent;
+    
+    showCustomConfirm("このログを削除しますか？", 
+      () => {
+        // OK押下後：削除ボタンを無効化
+        deleteBtn.textContent = '削除中...';
+        deleteBtn.style.pointerEvents = 'none'; // クリック無効化
+        deleteBtn.style.opacity = '0.5';
+        deleteBtn.style.cursor = 'not-allowed';
+        // ★修正：削除→一覧再取得→再描画を1本化★
+        google.script.run.withSuccessHandler(res => {
+          if(res.success) {
+            // 成功時：その行を即座に削除（視覚的フィードバック）
+            const logItem = deleteBtn.closest('.log-item');
+            if(logItem) {
+              logItem.style.opacity = '0.5';
+              logItem.style.transition = 'opacity 0.2s';
+              setTimeout(() => {
+                logItem.remove();
+              }, 200);
+            }
             
-            // 会話履歴を更新（API用）
-            if (ans && ans !== '-') {
-              conversationHistory[ai].push({ role: 'user', content: text });
-              // Geminiはmodelロール、他はassistantロール
-              const assistantRole = (ai === 'gemini') ? 'model' : 'assistant';
-              conversationHistory[ai].push({ role: assistantRole, content: ans });
-              
-              // 上限超過時は古いものから削除
-              if (conversationHistory[ai].length > MAX_HISTORY_PER_AI * 2) {
-                conversationHistory[ai] = conversationHistory[ai].slice(-MAX_HISTORY_PER_AI * 2);
+            // ★修正：削除後に一覧を再取得して再描画（確実に同期）★
+            google.script.run.withSuccessHandler(list => {
+              const c = document.getElementById('logListContainer'); 
+              c.innerHTML = "";
+              if(list.length===0) {
+                c.innerHTML = "<div style='padding:20px; color:#999;'>ログがありません</div>";
+              } else {
+                list.forEach(l => {
+                  let d = document.createElement('div'); 
+                  d.className="log-item";
+                  d.innerHTML = `
+                    <div>
+                      <b>${l.time}</b> ${l.title}
+                    </div>
+                    <div>
+                      <span class="log-item-delete" onclick="deleteLogItem('${l.id}', event)">削除</span>
+                    </div>
+                  `;
+                  d.onclick = (e) => {
+                    if(e.target.classList.contains('log-item-delete')) return;
+                    document.getElementById('historyModal').style.display='none'; 
+                    setTimeout(() => showCustomConfirm("このログを読み込みますか？\n(現在の画面は上書きされます)", () => {
+                       google.script.run.withSuccessHandler(restoreSessionToUI).getSessionLogs(l.id);
+                    }), 100);
+                  };
+                  c.appendChild(d);
+                });
               }
-            }
-            
-            // 共有ログを更新（直近3ラウンド分）
-            const roundText = `ユーザー: ${text}\n`;
-            let aiResponses = '';
-            // responseフィールドからテキストを取得する形に合わせる
-            if (res && res.response) {
-               // シングルレスポンス形式の場合
-               aiResponses = `${ai}: ${res.response.substring(0, 200)}...\n`;
-            }
-            
-            if (aiResponses) {
-              roomSharedHistory.push(roundText + aiResponses);
-              if (roomSharedHistory.length > MAX_SHARED_ROUNDS) {
-                roomSharedHistory = roomSharedHistory.slice(-MAX_SHARED_ROUNDS);
-              }
-            }
-            
-            pending--;
-            if(pending===0){
-              showStatus('Complete', 'info');
-              done();
-            }
-          })
-          .withFailureHandler((err)=>{
-            setQA(ai, text, '(Error) ' + (err?.message || 'unknown'), false);
-            stampTime(ai);
-            pending--;
-            if(pending===0){
-              showStatus('Complete (with errors)', 'warn');
-              done();
-            }
-          })
-          .runRelay(text, imagesArray, target, historyPayload);
-      });
-    }
-
-    function pickAnswer(ai, res){
-      // res形式の揺れに強く (v0.2.9形式: {status, response, ver})
-      try{
-        if(res && res.response) return res.response;
-        
-        if(res?.data && typeof res.data === 'object'){
-          if(res.data[ai]) return res.data[ai];
-          const k = ai;
-          if(res.data[k]) return res.data[k];
-        }
-        if(res && typeof res === 'object'){
-          if(res[ai]) return res[ai];
-        }
-        if(typeof res === 'string') return res;
-        return JSON.stringify(res);
-      }catch(e){
-        return '(parse error)';
+            }).getLogList();
+          } else {
+            // ★修正：失敗時は行を消さずエラー表示★
+            showCustomAlert("削除に失敗しました: " + res.message);
+            deleteBtn.textContent = originalText;
+            deleteBtn.style.pointerEvents = 'auto'; // クリック再有効化
+            deleteBtn.style.opacity = '1';
+            deleteBtn.style.cursor = 'pointer';
+          }
+        }).withFailureHandler(e => {
+          // ★修正：失敗時は行を消さずエラー表示★
+          showCustomAlert("削除中にエラーが発生しました: " + e.message);
+          deleteBtn.textContent = originalText;
+          deleteBtn.style.pointerEvents = 'auto'; // クリック再有効化
+          deleteBtn.style.opacity = '1';
+          deleteBtn.style.cursor = 'pointer';
+        }).deleteLog(sessionId);
+      },
+      () => {
+        // キャンセル時：何も変えない（ボタンは有効のまま）
       }
-    }
-
-    // 各AIの会話履歴を保持（最新を上に表示）
-    let conversationDisplay = {
-      yui: [],   // [{time, userInput, aiResponse}, ...] 最新が先頭
-      gemini: [],
-      rex: []
+    );
+  }
+  
+  function closeHistoryModal() { document.getElementById('historyModal').style.display = 'none'; }
+  function openManualModal() { document.getElementById('manualModal').style.display = 'flex'; }
+  function closeManualModal() { document.getElementById('manualModal').style.display = 'none'; }
+  function openAdvanceModal() { document.getElementById('advanceModal').style.display = 'flex'; }
+  function closeAdvanceModal() { document.getElementById('advanceModal').style.display = 'none'; }
+  function closeCodeModal() { document.getElementById('codeModal').style.display = 'none'; }
+  
+  function showCustomConfirm(msg, yesCb, noCb) {
+    document.getElementById('confirmMessage').innerText = msg;
+    const modal = document.getElementById('customConfirmModal');
+    const confirmBtn = document.getElementById('confirmYesBtn');
+    const cancelBtn = document.getElementById('confirmCancelBtn');
+    
+    // OKボタンの処理
+    confirmBtn.onclick = () => { 
+      modal.style.display='none'; 
+      if(yesCb) yesCb(); 
     };
     
-    // 前回のテーマを保持（追記部分を検出するため）
-    let previousTheme = '';
-    
-    // ★会話履歴の保存・復元（localStorage使用）
-    const STORAGE_KEY_CONVERSATION = 'ai_strategy_room_conversation';
-    const STORAGE_KEY_THEME = 'ai_strategy_room_previous_theme';
-    
-    function saveConversationDisplay(){
-      try{
-        localStorage.setItem(STORAGE_KEY_CONVERSATION, JSON.stringify(conversationDisplay));
-        localStorage.setItem(STORAGE_KEY_THEME, previousTheme);
-      }catch(e){
-        console.warn('会話履歴の保存に失敗:', e);
-      }
+    // ★修正：キャンセル時のコールバック対応★
+    if(cancelBtn) {
+      cancelBtn.onclick = () => {
+        modal.style.display='none';
+        if(noCb) noCb();
+      };
     }
     
-    function loadConversationDisplay(){
-      try{
-        const saved = localStorage.getItem(STORAGE_KEY_CONVERSATION);
-        if(saved){
-          const parsed = JSON.parse(saved);
-          if(parsed.yui) conversationDisplay.yui = parsed.yui;
-          if(parsed.gemini) conversationDisplay.gemini = parsed.gemini;
-          if(parsed.rex) conversationDisplay.rex = parsed.rex;
+    modal.style.display = 'flex';
+  }
+  function closeConfirmModal() { document.getElementById('customConfirmModal').style.display = 'none'; }
+  // ★版情報一元化：エラーメッセージに版情報を付与★
+  function showCustomAlert(msg) { 
+    const versionInfo = ` (${APP_VERSION} / b=${currentBuildId})`;
+    const msgWithVersion = msg.includes('(') && msg.includes(')') ? msg : msg + versionInfo;
+    document.getElementById('alertMessage').innerText = msgWithVersion; 
+    document.getElementById('customAlertModal').style.display = 'flex'; 
+  }
+  function closeAlertModal() { document.getElementById('customAlertModal').style.display = 'none'; }
+  
+  function restoreSessionToUI(logs) {
+    if(!logs || !logs.length) return;
+    resetInputArea();
+    ['yui','gemini','rex'].forEach(a => document.getElementById('hist-'+a).innerHTML="");
+    answerCardCount = { yui: 0, gemini: 0, rex: 0 };
+    if(logs[0].title) document.getElementById('topicTitle').value = logs[0].title;
+    logs.forEach(row => {
+      if(row.speaker !== 'User') {
+        const agent = row.speaker.toLowerCase();
+        if(document.getElementById('hist-'+agent)) {
+          answerCardCount[agent]++;
+          const isFirstAnswer = (answerCardCount[agent] === 1);
+          const cardId = 'card-restore-' + Date.now() + '-' + Math.random();
+          const answerCard = createAnswerCard(cardId, agent, row.content, true, isFirstAnswer);
+          document.getElementById('hist-'+agent).insertAdjacentHTML('afterbegin', answerCard);
+          // ★修正：折りたたみボタンの表示判定★
+          checkCardCollapse(cardId);
         }
-        
-        const savedTheme = localStorage.getItem(STORAGE_KEY_THEME);
-        if(savedTheme) previousTheme = savedTheme;
-        
-        // 復元した会話を画面に表示
-        AI_LIST.forEach(ai => {
-          const qEl = document.getElementById('q-'+ai);
-          const aEl = document.getElementById('a-'+ai);
-          if(qEl && aEl) renderConversation(ai, qEl, aEl);
-        });
-      }catch(e){
-        console.warn('会話履歴の読み込みに失敗:', e);
       }
-    }
+    });
     
-    function clearConversationDisplay(){
-      conversationDisplay = { yui: [], gemini: [], rex: [] };
-      previousTheme = '';
-      localStorage.removeItem(STORAGE_KEY_CONVERSATION);
-      localStorage.removeItem(STORAGE_KEY_THEME);
-      AI_LIST.forEach(ai => {
-        const qEl = document.getElementById('q-'+ai);
-        const aEl = document.getElementById('a-'+ai);
-        if(qEl) qEl.innerHTML = '-';
-        if(aEl) aEl.innerHTML = '-';
-      });
-    }
-
-    function setQA(ai, q, a, thinking){
-      const qEl = document.getElementById('q-'+ai);
-      const aEl = document.getElementById('a-'+ai);
-      
-      if(thinking){
-        // Thinking中：追記内容だけを表示
-        const currentTime = nowHHMMSS();
-        
-        // 追記部分を検出（前回のテーマと比較）
-        let displayInput = q || '-';
-        if(previousTheme && q && q.startsWith(previousTheme)){
-          // 前回のテーマで始まっている場合は追記部分だけを表示
-          displayInput = q.substring(previousTheme.length).trim();
-          if(!displayInput) displayInput = q; // 追記部分がない場合は全体を表示
-        }
-        
-        const newEntry = {
-          time: currentTime,
-          userInput: displayInput, // 追記部分だけを保存
-          aiResponse: 'Thinking...'
-        };
-        conversationDisplay[ai].unshift(newEntry); // 最新を先頭に
-        
-        // 表示：最新のユーザー入力だけを表示（追記分のみ）
-        qEl.innerHTML = formatUserInput(newEntry.userInput);
-        aEl.innerHTML = '<span class="muted">Thinking...</span>';
-        aEl.classList.add('muted');
-        
-        // テーマを更新（次の追記検出のため）
-        if(q) previousTheme = q;
-      } else {
-        // 回答が返ってきた時
-        const currentTime = nowHHMMSS();
-        
-        // 最新のエントリを更新
-        if(conversationDisplay[ai].length > 0 && conversationDisplay[ai][0].aiResponse === 'Thinking...'){
-          conversationDisplay[ai][0].aiResponse = a || '-';
-          conversationDisplay[ai][0].time = currentTime;
-        } else {
-          // 新しいエントリを追加
-          let displayInput = q || '-';
-          if(previousTheme && q && q.startsWith(previousTheme)){
-            displayInput = q.substring(previousTheme.length).trim();
-            if(!displayInput) displayInput = q;
-          }
-          conversationDisplay[ai].unshift({
-            time: currentTime,
-            userInput: displayInput,
-            aiResponse: a || '-'
-          });
-        }
-        
-        // 表示：最新の回答を上に、会話形式で表示
-        renderConversation(ai, qEl, aEl);
-        aEl.classList.remove('muted');
-      }
-      
-      qEl.classList.remove('muted');
-      
-      // 会話履歴を保存（localStorage）
-      saveConversationDisplay();
-    }
-
-    function formatUserInput(input){
-      // ユーザーの指示を視覚的に区別
-      return '<span class="userInput">【あなた】</span> ' + escapeHtml(input);
-    }
-
-    function formatAIResponse(time, response){
-      // AIの回答を視覚的に区別（時間を太文字で先頭に）
-      return '<strong class="aiTime">' + escapeHtml(time) + '</strong> <span class="aiResponse">' + escapeHtml(response) + '</span>';
-    }
-
-    function renderConversation(ai, qEl, aEl){
-      // 最新の回答を上に表示（会話形式）
-      const conversations = conversationDisplay[ai];
-      if(conversations.length === 0){
-        qEl.innerHTML = '-';
-        aEl.innerHTML = '-';
-        return;
-      }
-      
-      // 最新のユーザー入力だけを表示（追記分のみ）
-      const latestUserInput = conversations[0].userInput;
-      qEl.innerHTML = formatUserInput(latestUserInput);
-      
-      // AIの回答を最新から順に表示（最新が上）
-      const responses = conversations
-        .filter(c => c.aiResponse && c.aiResponse !== 'Thinking...' && c.aiResponse !== '-')
-        .map(c => formatAIResponse(c.time, c.aiResponse))
-        .join('<br><br>');
-      
-      aEl.innerHTML = responses || '-';
-    }
-
-    function escapeHtml(text){
-      const div = document.createElement('div');
-      div.textContent = text;
-      return div.innerHTML;
-    }
-
-    function stampTime(ai){
-      const chip = document.getElementById('time-'+ai);
-      chip.textContent = nowHHMMSS();
-      updateSelectedTimeChips();
-    }
-
-    function appendHistory(ai, q, a){
-      histories[ai] = histories[ai] || [];
-      histories[ai].push({ t: Date.now(), q, a });
-      // 必要以上に肥大化しない
-      if(histories[ai].length > 30) histories[ai] = histories[ai].slice(-30);
-    }
-
-    // ===== 回答の転送（カード下ボタン） =====
-    function forwardAnswer(from, to){
-      // conversationDisplayから最新の回答を取得
-      const latestResponse = conversationDisplay[from] && conversationDisplay[from].length > 0 
-        ? conversationDisplay[from].find(c => c.aiResponse && c.aiResponse !== 'Thinking...' && c.aiResponse !== '-')
-        : null;
-      
-      if(!latestResponse || !latestResponse.aiResponse){
-        showStatus('転送する回答がまだありません', 'warn');
-        return;
-      }
-      
-      const text = `【${AI_LABEL[from]}の回答】\n${latestResponse.aiResponse}\n\nこれを踏まえて、改善点/抜け/次の一手を教えて。`;
-      // toだけ選択して投げる
-      selectedAgents = new Set([to]);
-      updateAgentButtons();
-      updateSelectedTimeChips();
-
-      // 入力欄も転送文にする（ユーザーが見て安心）
-      document.getElementById('userInput').value = text;
-      runDiscuss();
-    }
-
-    // ===== 画像縮小 =====
-    function processMultipleImages(imagesArray, callback) {
-      const maxWidth = 800;
-      const quality = 0.7;
-      const processed = [];
-      let completed = 0;
-
-      if (imagesArray.length === 0) { callback([]); return; }
-
-      imagesArray.forEach((item, index) => {
-        const img = new Image();
-        img.onload = function() {
-          let w = img.width, h = img.height;
-          if (w > maxWidth) { h = Math.round(h * (maxWidth / w)); w = maxWidth; }
-          const cvs = document.createElement('canvas');
-          cvs.width = w; cvs.height = h;
-          cvs.getContext('2d').drawImage(img, 0, 0, w, h);
-          processed[index] = {
-            base64: cvs.toDataURL('image/jpeg', quality),
-            mime: item.mime || 'image/jpeg'
-          };
-          completed++;
-          if (completed === imagesArray.length) callback(processed);
-        };
-        img.onerror = function() {
-          processed[index] = item;
-          completed++;
-          if (completed === imagesArray.length) callback(processed);
-        };
-        img.src = item.base64;
-      });
-    }
-
-    // ===== Status =====
-    function showStatus(msg, type) {
-      const st = document.getElementById('status');
-      st.textContent = msg;
-      st.className = 'msg ' + (type || 'info');
-      st.style.display = 'block';
-    }
-
-    // ===== Utils =====
-    function makeId(){
-      return 'id_' + Math.random().toString(36).slice(2,9) + '_' + Date.now().toString(36);
-    }
-    function nowHHMMSS(){
-      const d = new Date();
-      const z = (n)=> String(n).padStart(2,'0');
-      return `${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())}`;
-    }
-  </script>
+    ['yui', 'gemini', 'rex'].forEach(agent => {
+      limitHistory(agent);
+    });
+  }
+</script>
 </body>
 </html>
+
