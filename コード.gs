@@ -1,27 +1,33 @@
 /**
  * APP: AI Strategy Room
  * FILE: Code.gs (Server-side)
- * VERSION: v5.12.2-stable
- * BUILD: 2025-12-23_2209_fix
- * AUTHOR: Rex (HEIC/PDF対応 + 自動圧縮・完全版)
+ * VERSION: v5.12.3-stable-github
+ * BUILD: 2025-12-24_1010_github_fix
+ * AUTHOR: Rex (GitHubコード取得機能追加・修正版)
  *
- * TITLE: HEIC/PDF対応 + 自動圧縮・完全版 (v5.12.2)
- * DATE(JST): 2025-12-23 22:09 JST
+ * TITLE: GitHubコード取得機能追加・修正版 (v5.12.3)
+ * CODING_TIME(JST): 2025-12-24 10:10 JST
  *
  * CHANGES:
- * - Base: v5.12.1-stableを基準に、PDF.js worker設定・toBlobベース圧縮・長辺1600px・PDF1ページのみに修正
- * - Code.gsは変更なし（HTML側で送信前にデータを軽くするため）
+ * - Feat: @code / @c コマンドでGitHubからコードを取得してプロンプトに差し込む機能を追加
+ * - Fix: AuthorizationヘッダをBearer方式に変更
+ * - Fix: @codeが複数行ある場合に対応（複数ファイル取得）
+ * - Fix: 巨大ファイルの上限を設定（50KB）して途中で切る
+ * - Fix: sha256計算を切り捨て前のrawContentで行うように修正（検証情報の整合性確保）
+ * - Fix: 切り捨て発生時にSystem行にtrunc=1 shown=xxxxxを追加
+ * - Fix: エラー表示の二重Systemを解消（fetchGithubCodeByCommand()はSystem:を付けない、runRelay()側で【System】を付与）
+ * - Feat: 取得成功時に検証情報（path/length/sha256）をSystem行として出力
  *
- * BuildParam(b): ?b=2025-12-23_2209_fix
+ * BuildParam(b): ?b=2025-12-24_1010_github_fix
  * DebugParam: &debug=1
  * POLICY: ユーザーの設定を最優先し、エラー時は迷わず安定版(1.5-flash)を使用する
  */
 
 // ▼▼ 設定エリア ▼▼
-const APP_VERSION = 'v5.12.2-stable';
-const BUILD_ID = '2025-12-23_2209_fix';
-const AUTHOR = 'Rex (HEIC/PDF対応 + 自動圧縮・完全版)';
-const BUILD_JST = '2025-12-23 22:09 JST';
+const APP_VERSION = 'v5.12.3-stable-github';
+const BUILD_ID = '2025-12-24_1010_github_fix';
+const AUTHOR = 'Rex (GitHubコード取得機能追加・修正版)';
+const BUILD_JST = '2025-12-24 10:10 JST';
 
 const VER = APP_VERSION;
 const FOLDER_NAME = "AI_Strategy_Room_Images"; // 画像保存先フォルダ
@@ -126,6 +132,49 @@ function runRelay(theme, title, imagesBase64, aiModel, historyPayload, sessionId
   finalPrompt += "  （必要なら）#### 補足（最小限）\n";
   finalPrompt += "【指示終了】\n\n";
 
+  // ★新機能：@code / @c コマンドでGitHubからコードを取得（複数対応）★
+  let githubCodeInfo = "";
+  let githubCodeLoaded = false;
+  try {
+    const githubCodeResults = fetchGithubCodeByCommand(theme);
+    if (githubCodeResults.length > 0) {
+      let hasSuccess = false;
+      let codeBlocks = [];
+      let errorMessages = [];
+      
+      githubCodeResults.forEach(result => {
+        if (result.success) {
+          codeBlocks.push(result.code);
+          hasSuccess = true;
+          
+          // ★検証情報：path, length, sha256をSystem行として出力（切り捨て発生時はtrunc=1 shown=xxxxxも追加）★
+          let verifyInfo = `System: GitHub OK ${result.path} len=${result.length} sha256=${result.sha256}`;
+          if (result.truncated) {
+            verifyInfo += ` trunc=1 shown=${result.shownLen}`;
+          }
+          finalPrompt += `\n${verifyInfo}\n`;
+        } else if (result.error) {
+          errorMessages.push(result.error);
+        }
+      });
+      
+      if (codeBlocks.length > 0) {
+        finalPrompt += `\n\n【GitHubから取得したコード】\n${codeBlocks.join('\n\n')}\n\n`;
+        githubCodeLoaded = true;
+        githubCodeInfo = " (GitHub Code Loaded)";
+      }
+      
+      if (errorMessages.length > 0) {
+        errorMessages.forEach(error => {
+          finalPrompt += `\n\n【System】${error}\n\n`;
+        });
+      }
+    }
+  } catch (e) {
+    // エラー時は握りつぶさず、Systemメッセージとして追加
+    finalPrompt += `\n\n【System】GitHub Code Fetch Error: ${String(e && e.message ? e.message : e)}\n\n`;
+  }
+
   if (title && title.trim() !== "") finalPrompt += `【議題: ${title}】\n\n${theme}`;
   else finalPrompt += `${theme}\n\n(※この議論のタイトルを **### タイトル** の形式で冒頭に付けてください)`;
 
@@ -138,7 +187,7 @@ function runRelay(theme, title, imagesBase64, aiModel, historyPayload, sessionId
     logToSheet(sessionId, aiModel, "ERROR: " + String(e && e.message ? e.message : e), title);
   }
 
-  return { status: "success", response: responseText, ver: VER, appVersion: APP_VERSION, buildId: BUILD_ID };
+  return { status: "success", response: responseText, ver: VER + githubCodeInfo, appVersion: APP_VERSION, buildId: BUILD_ID };
 }
 
 // ログ保存機能（appVersion/buildIdも保存）
@@ -400,6 +449,160 @@ function fetchGeminiWithRetry(contents, apiKey, preferredModel) {
 
   // 全モデル失敗した場合
   throw new Error(`Gemini API Error (All attempts failed): ${lastError}`);
+}
+
+// GitHubからコードを取得（@code / @c コマンド対応・複数対応）
+function fetchGithubCodeByCommand(text) {
+  if (!text || typeof text !== 'string') {
+    return [];
+  }
+  
+  // @code または @c のパターンを検出（複数行に対応）
+  const codePattern = /@(?:code|c)\s+([^\s\n]+)/gi;
+  const matches = [];
+  let match;
+  while ((match = codePattern.exec(text)) !== null) {
+    const filePath = match[1].trim();
+    if (filePath) {
+      matches.push(filePath);
+    }
+  }
+  
+  if (matches.length === 0) {
+    return [];
+  }
+  
+  // Script Properties から GitHub設定を取得
+  const props = PropertiesService.getScriptProperties();
+  const githubToken = props.getProperty('GITHUB_TOKEN');
+  const githubRepo = props.getProperty('GITHUB_REPO');
+  
+  if (!githubToken || !githubRepo) {
+    // 未設定時は1件だけエラーを返す（複数件あっても最初の1件のみ）
+    // ★修正：System:を付けない（runRelay()側で【System】を付与）★
+    return [{ success: false, error: "GitHub Token/Repo not set." }];
+  }
+  
+  const MAX_FILE_SIZE = 50000; // 50KB（約5万文字）を上限とする
+  const results = [];
+  
+  // 各ファイルを取得
+  matches.forEach(filePath => {
+    try {
+      // パスを / 区切りで分割し、各セグメントをURLエンコード（日本語や記号対策）
+      const pathSegments = filePath.split('/').map(segment => encodeURIComponent(segment));
+      const encodedPath = pathSegments.join('/');
+      
+      // GitHub Contents API を呼び出す
+      const apiUrl = `https://api.github.com/repos/${githubRepo}/contents/${encodedPath}`;
+      
+      const options = {
+        method: 'get',
+        headers: {
+          'Authorization': `Bearer ${githubToken}`, // Bearer方式に変更
+          'Accept': 'application/vnd.github.v3.raw',
+          'User-Agent': 'AI-Strategy-Room'
+        },
+        muteHttpExceptions: true
+      };
+      
+      const response = UrlFetchApp.fetch(apiUrl, options);
+      const statusCode = response.getResponseCode();
+      
+      if (statusCode === 200) {
+        // まずrawContentを取得（切り捨て前の全文）
+        const rawContent = response.getContentText();
+        const fileName = pathSegments[pathSegments.length - 1];
+        const originalLength = rawContent.length;
+        
+        // SHA256ハッシュを計算（切り捨て前のrawContentで計算）
+        const hashBytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, rawContent, Utilities.Charset.UTF_8);
+        const sha256 = hashBytes.map(b => ('0' + (b & 0xFF).toString(16)).slice(-2)).join('');
+        
+        // 表示用contentを準備（巨大ファイルの場合は途中で切る）
+        let content = rawContent;
+        let truncated = false;
+        let shownLen = originalLength;
+        if (content.length > MAX_FILE_SIZE) {
+          content = content.substring(0, MAX_FILE_SIZE) + '\n\n... (ファイルが大きすぎるため、先頭' + MAX_FILE_SIZE + '文字のみ表示)';
+          truncated = true;
+          shownLen = MAX_FILE_SIZE;
+        }
+        
+        // コードフェンス付きで返す
+        const codeBlock = `\`\`\`${getFileExtension(fileName)}\n${content}\n\`\`\``;
+        
+        // 検証情報を付与（path, length, sha256, truncated, shownLen）
+        results.push({ 
+          success: true, 
+          code: codeBlock, 
+          error: null,
+          path: filePath,
+          length: originalLength,
+          sha256: sha256,
+          truncated: truncated,
+          shownLen: shownLen
+        });
+      } else if (statusCode === 404) {
+        // ★修正：System:を付けない（runRelay()側で【System】を付与）★
+        results.push({ success: false, error: `GitHub Fetch Error (404): File not found - ${filePath}` });
+      } else {
+        const errorText = response.getContentText();
+        // ★修正：System:を付けない（runRelay()側で【System】を付与）★
+        results.push({ success: false, error: `GitHub Fetch Error (${statusCode}): ${errorText}` });
+      }
+    } catch (e) {
+      // ★修正：System:を付けない（runRelay()側で【System】を付与）★
+      results.push({ success: false, error: `GitHub Fetch Error: ${String(e && e.message ? e.message : e)}` });
+    }
+  });
+  
+  return results;
+}
+
+// ファイル拡張子から言語名を推測
+function getFileExtension(fileName) {
+  if (!fileName) return '';
+  const ext = fileName.split('.').pop().toLowerCase();
+  const extMap = {
+    'js': 'javascript',
+    'jsx': 'javascript',
+    'ts': 'typescript',
+    'tsx': 'typescript',
+    'py': 'python',
+    'rb': 'ruby',
+    'java': 'java',
+    'cpp': 'cpp',
+    'c': 'c',
+    'cs': 'csharp',
+    'go': 'go',
+    'rs': 'rust',
+    'php': 'php',
+    'swift': 'swift',
+    'kt': 'kotlin',
+    'scala': 'scala',
+    'html': 'html',
+    'css': 'css',
+    'scss': 'scss',
+    'less': 'less',
+    'json': 'json',
+    'xml': 'xml',
+    'yaml': 'yaml',
+    'yml': 'yaml',
+    'md': 'markdown',
+    'sh': 'bash',
+    'bash': 'bash',
+    'zsh': 'bash',
+    'ps1': 'powershell',
+    'sql': 'sql',
+    'r': 'r',
+    'm': 'matlab',
+    'gs': 'javascript', // Google Apps Script
+    'tsx': 'typescript',
+    'vue': 'vue',
+    'svelte': 'svelte'
+  };
+  return extMap[ext] || ext;
 }
 
 // 画像サイズチェック

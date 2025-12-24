@@ -1,12 +1,12 @@
 <!--
   APP: AI Strategy Room
   FILE: index.html (Client-side)
-  VERSION: v5.12.2-stable
-  BUILD: 2025-12-23_2209_fix
-  AUTHOR: Rex (HEIC/PDF対応 + 自動圧縮・完全版)
+  VERSION: v5.12.3-stable-github
+  BUILD: 2025-12-24_1010_github_fix
+  AUTHOR: Rex (GitHubコード取得機能追加・修正版)
   
-  TITLE: HEIC/PDF対応 + 自動圧縮・完全版 (v5.12.2)
-  DATE(JST): 2025-12-23 22:09 JST
+  TITLE: GitHubコード取得機能追加・修正版 (v5.12.3)
+  CODING_TIME(JST): 2025-12-24 10:10 JST
   
   CHANGES:
   - Base (なべさん→Rex): v5.10.0-fixedUIを基準に運用バグ修正
@@ -16,7 +16,7 @@
   - 履歴削除ボタンのdisabled対策 (なべさん→Rex): pointer-events制御で二重クリック防止
   - tryStartNewSession()のコメント修正 (なべさん→Rex): 実装と一致
   
-  BuildParam(b): ?b=2025-12-23_2209_fix
+  BuildParam(b): ?b=2025-12-24_1010_github_fix
   DebugParam: &debug=1
   POLICY: v5.10.0の見た目を維持しつつ、運用バグを修正
 -->
@@ -385,7 +385,7 @@
   <!-- ★2段目：アプリ名称＋バージョン＋ビルド番号★ -->
   <div class="input-card">
     <div class="tier-2">
-      <div style="font-size:1.2rem; font-weight:bold; color:#444;">AI Strategy Room <span style="font-size:0.8rem; background:#eee; padding:2px 6px; border-radius:4px;" id="appVersion">v5.12.2-stable</span> <span style="font-size:0.7rem; color:#999;" id="buildInfo">Build: <span id="buildId">2025-12-23_2209_fix</span></span></div>
+      <div style="font-size:1.2rem; font-weight:bold; color:#444;">AI Strategy Room <span style="font-size:0.8rem; background:#eee; padding:2px 6px; border-radius:4px;" id="appVersion">v5.12.3-stable-github</span> <span style="font-size:0.7rem; color:#999;" id="buildInfo">Build: <span id="buildId">2025-12-24_1010_github_fix</span></span></div>
       <div id="clock" style="color:#888; font-weight:bold;"></div>
     </div>
 
@@ -461,10 +461,10 @@
 <script>
   // ===== 設定 =====
   // ★版情報一元化：Code.gsから注入される値を使用（手打ちしない）★
-  const APP_VERSION = "<?= APP_VERSION ?>" || "v5.12.2-stable"; // フォールバック
-  const BUILD_ID = "<?= BUILD_ID ?>" || "2025-12-23_2209_fix"; // フォールバック
-  const AUTHOR = "<?= AUTHOR ?>" || "Rex (HEIC/PDF対応 + 自動圧縮・完全版)";
-  const BUILD_JST = "<?= BUILD_JST ?>" || "2025-12-23 22:09 JST";
+  const APP_VERSION = "<?= APP_VERSION ?>" || "v5.12.3-stable-github"; // フォールバック
+  const BUILD_ID = "<?= BUILD_ID ?>" || "2025-12-24_1010_github_fix"; // フォールバック
+  const AUTHOR = "<?= AUTHOR ?>" || "Rex (GitHubコード取得機能追加・修正版)";
+  const BUILD_JST = "<?= BUILD_JST ?>" || "2025-12-24 10:10 JST";
   
   // ★版情報一元化：URLパラメータからb（配布用）を読み取る★
   const urlParams = new URLSearchParams(window.location.search);
