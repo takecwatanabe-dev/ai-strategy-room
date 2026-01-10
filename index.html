@@ -1,16 +1,17 @@
 <!--
   APP: AI Strategy Room (AI会議室)
   FILE: index.html
-  VERSION: v16.3.8-hf1-full
-  DATE(JST): 2026-01-10 00:14 JST
-  TITLE: CUT継続でcontextが増えない問題の修正（参照箱）＋二重追加防止の完全化＋detectCut誤検知低減＋インジケータ矛盾解消（UIそのまま）
+  VERSION: v16.3.8-hf2-full
+  DATE(JST): 2026-01-10 14:57 JST
+  TITLE: CUT継続でcontextが増えない問題の修正（参照箱）＋二重追加防止の完全化＋detectCut誤検知低減（語尾除外/完結語尾抑制）＋遅延レスポンス時のtimeout行置換＋インジケータ矛盾解消（UIそのまま）
   CHANGES:
   - 【最重要】CUT継続でもcontextが確実に増えるように修正（ctx.text参照箱→最後にglobal contextへ反映）
   - 【最重要】二重追加防止を完全化（最初のresponseはrunStepで1回、続きは_handleCutContinuation_でcont分のみ追加）
-  - detectCutの誤検知を低減（「だ/よ/ね/わ/な」等をCUT候補から外し、短文×助詞止まり・接続形・省略記号中心に）
+  - detectCutの誤検知をさらに低減（文末「だ/よ/ね/わ/な/かな」等はCUT対象から除外、完結しやすい「ない/たい/よう/そう/らしい」等をCUT条件から外す）
+  - 遅延レスポンス取得時、context内のtimeout行を「追記」ではなく「置換」してズレを防止（見かけの遅延表示は維持）
   - インジケータの矛盾解消（Receivedをthinkingと独立に表示。設定ON/OFFは種類別に反映）
   AUTHOR: Yui（Fix/Integration）
-  BUILD_PARAM: ?b=2026-01-10_0014_hf1-full
+  BUILD_PARAM: ?b=2026-01-10_1457_hf2-full
   DEBUG_PARAM: &debug=1
 -->
 <!DOCTYPE html>
@@ -18,7 +19,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI Round Table v16.3.8-hf1-full</title>
+<title>AI Round Table v16.3.8-hf2-full</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>if(typeof pdfjsLib!=='undefined')pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";</script>
 <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
@@ -165,7 +166,7 @@
 <div class="container" id="appContainer">
   <div class="header">
     <div style="display:flex; align-items:center; gap:10px;">
-      <div class="app-title">AI Round Table <span class="app-meta">v16.3.8-hf1-full</span></div>
+      <div class="app-title">AI Round Table <span class="app-meta">v16.3.8-hf2-full</span></div>
     </div>
     <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
       <div class="font-ctrl-group">
@@ -355,7 +356,7 @@ function saveSettings() {
 }
 
 /* =========================================================
-   v16.3.8-hf1-full FIX 1: detectCut（誤検知低減）
+   v16.3.8-hf2-full FIX 1: detectCut（誤検知さらに低減）
 ========================================================= */
 function _detectCut_(text) {
   if (!text || typeof text !== 'string') return false;
@@ -372,15 +373,27 @@ function _detectCut_(text) {
   const last = lines[lines.length - 1];
   if (!last || last.length < 3) return false;
 
+  // 句点・終端記号があれば基本CUTではない
   if (/[。！？!?\.]$/.test(last)) return false;
+
+  // 省略記号が連続して終わる（... / ……）はCUT扱い
   if (/[\.．…]{2,}$/.test(last)) return true;
 
   const short = last.length <= 28;
 
-  if (short && /(の|が|を|に|で|と|は|も|か|や|へ)$/.test(last)) return true;
-  if (short && /(て|ので|のに|けど|けれど|から|ため|つつ)$/.test(last)) return true;
-  if (short && /(よう|そう|らしい|たい|ない)$/.test(last)) return true;
+  // ★除外（短文での口語終わりはCUTにしない）
+  if (short && /(だよね|だよ|だね|だ|よ|ね|わ|な|かな|かも|です|ます)$/.test(last)) return false;
 
+  // 末尾が読点で終わる（続きの可能性が高い）
+  if (short && /[、,]$/.test(last)) return true;
+
+  // 助詞止まり（未完の可能性が高い）
+  if (short && /(の|が|を|に|で|と|は|も|か|や|へ)$/.test(last)) return true;
+
+  // 接続形で止まる（未完の可能性が高い）
+  if (short && /(て|ので|のに|けど|けれど|から|ため|つつ)$/.test(last)) return true;
+
+  // ★完結しやすい語尾（ない/たい/よう/そう/らしい 等）はCUT条件から外した（誤検知抑制）
   return false;
 }
 
@@ -535,7 +548,15 @@ function _updateBadgeStates_() {
 
 function insertTemplate() {
   const t = document.getElementById('themeInput');
-  const template = `\n--------------------------------------------------\n【ファイル名: index.html】\n(ここにコードを貼る)\n\n--------------------------------------------------\n【ファイル名: Code.gs】\n(ここにコードを貼る)\n`;
+  const template = `
+--------------------------------------------------
+【ファイル名: index.html】
+(ここにコードを貼る)
+
+--------------------------------------------------
+【ファイル名: Code.gs】
+(ここにコードを貼る)
+`;
   t.value = t.value + template; t.focus();
 }
 
@@ -630,7 +651,7 @@ async function startAuto(theme) {
 }
 
 /* =========================================================
-   v16.3.8-hf1-full FIX 2: CUT継続（ctx.text参照箱）＋二重追加根絶
+   v16.3.8-hf2-full FIX 2: CUT継続（ctx.text参照箱）＋二重追加根絶（維持）
 ========================================================= */
 function _handleCutContinuation_(
   speaker, responseText, ctx, imgs, sessionId, title, role,
@@ -712,7 +733,7 @@ function _handleCutContinuation_(
 }
 
 /* =========================================================
-   v16.3.8-hf1-full FIX 3: runStep（context参照箱→必ずglobal反映）
+   v16.3.8-hf2-full FIX 3: runStep（遅延レスポンス時のtimeout行置換）
 ========================================================= */
 function runStep(speaker, instr, imgs, title, step, role){
   return new Promise((resolve)=>{
@@ -774,6 +795,9 @@ function runStep(speaker, instr, imgs, title, step, role){
     const MAX_RETRY = 10;
     let retryTimer = null;
 
+    // ★timeout行を保持（遅延レスポンスが来たら置換する）
+    let lastTimeoutLine = null;
+
     const timer = setTimeout(() => {
       if (done) return;
       done = true;
@@ -782,7 +806,8 @@ function runStep(speaker, instr, imgs, title, step, role){
       if (ansEl) ansEl.innerHTML = `<span style="color:#b45309; font-weight:bold;">${msg}</span>`;
       setIndicator('⏱ Timeout (move on)', 'timeout');
 
-      ctx.text += `[${speaker}]: ${msg}\n`;
+      lastTimeoutLine = `[${speaker}]: ${msg}\n`;
+      ctx.text += lastTimeoutLine;
       finalize();
 
       retryTimer = setInterval(() => {
@@ -802,7 +827,24 @@ function runStep(speaker, instr, imgs, title, step, role){
               ansEl.innerHTML = `<span style="color:#10b981; font-weight:bold;">(遅延レスポンス取得)</span><br>` + formatMarkdown(lastLog.content);
               setIndicator('↻ Late response fetched', 'late');
 
-              ctx.text += `[${speaker}]: ${lastLog.content}\n`;
+              const lateLine = `[${speaker}]: ${lastLog.content}\n`;
+
+              // ★ctx.text内のtimeout行を置換（追記でズレないように）
+              if (typeof ctx.text === 'string') {
+                if (ctx.text.includes(lateLine)) {
+                  // 既に入っているなら何もしない（多重取得対策）
+                } else if (lastTimeoutLine && ctx.text.includes(lastTimeoutLine)) {
+                  const idx = ctx.text.lastIndexOf(lastTimeoutLine);
+                  if (idx !== -1) {
+                    ctx.text = ctx.text.slice(0, idx) + lateLine + ctx.text.slice(idx + lastTimeoutLine.length);
+                  } else {
+                    ctx.text += lateLine;
+                  }
+                } else {
+                  ctx.text += lateLine;
+                }
+              }
+
               context = ctx.text;
 
               if (retryTimer) clearInterval(retryTimer);
