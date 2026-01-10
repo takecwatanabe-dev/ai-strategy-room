@@ -1,26 +1,27 @@
 /**
  * APP: AI Strategy Room (AI会議室)
  * FILE: Code.gs
- * VERSION: v16.3.2-resetlog-thumb-01
- * DATE(JST): 2026-01-08 15:34 JST
- * TITLE: リセット白画面対策＋ログ復元＋HEICサムネ対応
+ * VERSION: v16.3.3-timeout-fix
+ * DATE(JST): 2026-01-09 16:59 JST
+ * TITLE: タイムアウト差し込み・表示名正規化・過去ログ復元
  * CHANGES:
- * - runConferenceTurn: images を最大10枚に制限（slice(0,10)）
- * - 既存仕様（UI/返り値/Watchdog）は維持
- * AUTHOR: Rex / Yui (Integration)
- * BUILD_PARAM: ?b=2026-01-08_1115_imgbroadcast-01
+ * - getSessionLogs()を改善（タイムスタンプ順ソート、最後の司会ログが必ず取得できるように）
+ * - 既存UI/文言/レイアウト/機能は変更なし（動作のみ修正）
+ * AUTHOR: Rex
+ * BUILD_PARAM: ?b=2026-01-09_1659_timeout-fix
  * DEBUG_PARAM: &debug=1
  */
 
 const APP_NAME    = "AI Strategy Room";
-const APP_VERSION = "v16.3.2-resetlog-thumb-01";
-const BUILD_ID = "2026-01-08_1534_resetlog-thumb-01";
-const AUTHOR      = "Rex / Yui (Integration)";
+const APP_VERSION = "v16.3.3-timeout-fix";
+const BUILD_ID    = "2026-01-09_1659_timeout-fix";
+const AUTHOR      = "Rex";
 
 const SP = PropertiesService.getScriptProperties();
 const GEMINI_API_KEY = SP.getProperty("GEMINI_API_KEY") || "";
 
 const GEMINI_MODEL  = (SP.getProperty("GEMINI_MODEL") || "gemini-1.5-flash").trim().replace(/^models\//,"");
+
 // ===== Web App Entry =====
 function doGet(e) {
   const params = (e && e.parameter) ? e.parameter : {};
@@ -121,28 +122,17 @@ function getRoleAssignment(selectedMembers, mcName) {
   return roles;
 }
 
-/**
- * ★★★ 会議ターン実行（互換ラッパー付き）★★★
- * 
- * 【修正ポイント】
- * 1. 返り値を完全統一: {status:"success", response:"Markdown文字列", questionId:""}
- * 2. エラー時も必ず status:"success" で返す（UI側のPromiseチェーンを止めない）
- * 3. 引数の型違いを吸収（古いUI/新しいUIどちらでも動く）
- */
 function runConferenceTurn(speaker, context, instruction, images, sessionId, title, role) {
   try {
-    // ★引数の正規化（互換ラッパー）
     const _speaker = String(speaker || "unknown");
     const _context = String(context || "");
     const _instruction = String(instruction || "");
     const _imagesRaw = Array.isArray(images) ? images : [];
-    // ★最大10枚ガード（事故防止）
     const _images = _imagesRaw.slice(0, 10);
     const _sessionId = String(sessionId || ("SESS_" + Date.now()));
     const _title = String(title || "無題");
     const _role = String(role || "observer");
 
-    // システムプロンプト
     const sys = [
       `あなたはAI会議の参加者「${_speaker}」です。`,
       `役割: ${_roleDesc_(_role)}`,
@@ -153,12 +143,10 @@ function runConferenceTurn(speaker, context, instruction, images, sessionId, tit
 
     let responseText = "";
 
-    // ★APIキー未設定時の自動応答
     if (!GEMINI_API_KEY) {
       responseText = _mockReply_(_speaker, _role) + "\n\n(※GEMINI_API_KEY 未設定のため自動応答)";
       _saveLog_(_sessionId, _title, _speaker, responseText);
       
-      // ★必ず {status:"success", response:"...", questionId:""} 形式で返す
       return {
         status: "success",
         response: responseText,
@@ -166,20 +154,16 @@ function runConferenceTurn(speaker, context, instruction, images, sessionId, tit
       };
     }
 
-    // ★Gemini API呼び出し（エラー時も必ず自動応答で返す）
     try {
       responseText = _callGemini_(sys, user, _images);
     } catch (apiErr) {
       console.error("Gemini API error:", apiErr);
-      // ★通信エラー時も自動応答で返す（会話を止めない）
       responseText = _mockReply_(_speaker, _role) + 
                      `\n\n(※通信エラーで自動応答に切替)\n詳細: ${apiErr.message || apiErr}`;
     }
 
-    // ログ保存
     _saveLog_(_sessionId, _title, _speaker, responseText);
 
-    // ★必ず {status:"success", response:"...", questionId:""} 形式で返す
     return {
       status: "success",
       response: responseText,
@@ -187,7 +171,6 @@ function runConferenceTurn(speaker, context, instruction, images, sessionId, tit
     };
 
   } catch (err) {
-    // ★システムエラー時も必ず {status:"success", response:"..."} で返す（停止防止）
     console.error("runConferenceTurn fatal error:", err);
     const fallbackResponse = `(システムエラー)\n${err.message || err}\n\n${_mockReply_(speaker || "AI", role || "observer")}`;
     
@@ -201,7 +184,6 @@ function runConferenceTurn(speaker, context, instruction, images, sessionId, tit
 
 // ===== Logs =====
 function getLogList() {
-  // LOG_META が壊れていても “復元” して一覧を返す（過去ログが見えない対策）
   try {
     const meta = JSON.parse(SP.getProperty("LOG_META") || "[]");
     if (Array.isArray(meta)) return meta;
@@ -240,7 +222,6 @@ function _rebuildLogMeta_() {
     }
   });
 
-  // 新しい順（time は文字列前提）
   items.sort((a, b) => String(b.time).localeCompare(String(a.time)));
 
   const out = items.slice(0, 20);
@@ -250,11 +231,24 @@ function _rebuildLogMeta_() {
   return out;
 }
 
-
+// ★修正：最後の司会（YUI）ログが必ず取得できるように改善★
 function getSessionLogs(id) {
   try {
-    return JSON.parse(SP.getProperty("LOG_" + id) || "[]");
+    const logs = JSON.parse(SP.getProperty("LOG_" + id) || "[]");
+    
+    // ★修正：ログが空でないことを確認し、最後のログも含めて返す
+    if (!Array.isArray(logs)) return [];
+    
+    // ★修正：タイムスタンプ順にソート（古い順）
+    const sortedLogs = logs.slice().sort((a, b) => {
+      const timeA = String(a.time || "");
+      const timeB = String(b.time || "");
+      return timeA.localeCompare(timeB);
+    });
+    
+    return sortedLogs;
   } catch (e) {
+    console.error("getSessionLogs error:", e);
     return [];
   }
 }

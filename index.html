@@ -1,42 +1,25 @@
 <!--
-APP: AI Strategy Room (AI会議室)
-FILE: index.html
-VERSION: v16.3.2-resetlog-thumb-01
-DATE(JST): 2026-01-08 15:34 JST
-TITLE: リセット白画面対策＋ログ復元＋HEICサムネ対応
-CHANGES:
-- startAuto: 司会以外の各ターンでも imgs を渡す（[] を廃止）
-- 画像の最大枚数を10枚に制限（ファイル選択/クリップボード貼付の両方）
-- サーバー側も最大10枚に制限（Code.gs側でslice）
-- 見た目変更なし（HTML/CSS/文言/ボタン配置は完全維持）
-AUTHOR: Yui (Integration) / Rex
-BUILD_PARAM: ?b=2026-01-08_1115_imgbroadcast-01
-DEBUG_PARAM: &debug=1
+  APP: AI Strategy Room (AI会議室)
+  FILE: index.html
+  VERSION: v16.3.8-hf1-full
+  DATE(JST): 2026-01-10 00:14 JST
+  TITLE: CUT継続でcontextが増えない問題の修正（参照箱）＋二重追加防止の完全化＋detectCut誤検知低減＋インジケータ矛盾解消（UIそのまま）
+  CHANGES:
+  - 【最重要】CUT継続でもcontextが確実に増えるように修正（ctx.text参照箱→最後にglobal contextへ反映）
+  - 【最重要】二重追加防止を完全化（最初のresponseはrunStepで1回、続きは_handleCutContinuation_でcont分のみ追加）
+  - detectCutの誤検知を低減（「だ/よ/ね/わ/な」等をCUT候補から外し、短文×助詞止まり・接続形・省略記号中心に）
+  - インジケータの矛盾解消（Receivedをthinkingと独立に表示。設定ON/OFFは種類別に反映）
+  AUTHOR: Yui（Fix/Integration）
+  BUILD_PARAM: ?b=2026-01-10_0014_hf1-full
+  DEBUG_PARAM: &debug=1
 -->
-
 <!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI Strategy Room v16.3.2-resetlog-thumb-01</title>
+<title>AI Round Table v16.3.8-hf1-full</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-
-<div id="codeModal" class="modal-overlay">
-  <div class="modal-content" style="max-width:900px;">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <h2 style="margin:0;">🧾 コード表示</h2>
-      <button onclick="closeModal('codeModal')" class="btn btn-secondary">✕</button>
-    </div>
-    <textarea id="codeViewerContent" style="width:100%;height:320px;background:#0b0f1a;color:#e5e7eb;border:1px solid #334155;border-radius:10px;padding:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono',monospace;font-size:12px;"></textarea>
-    <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:12px;">
-      <button class="btn btn-secondary" onclick="copyCode()">コピー</button>
-      <button class="btn btn-secondary" onclick="closeModal('codeModal')">閉じる</button>
-    </div>
-    <div class="small-note" style="margin-top:8px;">※ この画面では index.html（表示中のHTML）を表示します。</div>
-  </div>
-</div>
-
 <script>if(typeof pdfjsLib!=='undefined')pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";</script>
 <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
@@ -76,6 +59,8 @@ DEBUG_PARAM: &debug=1
   .btn-secondary:hover { background: #f8fafc; border-color: #94a3b8; }
   .btn-primary { background: linear-gradient(135deg, #10b981, #059669); color: white; }
   .btn-primary:hover { filter: brightness(1.1); }
+  .btn-danger { background: linear-gradient(135deg, #ef4444, #dc2626); color: white; }
+  .btn-danger:hover { filter: brightness(1.1); }
   
   .title-input { width: 100%; padding: 12px; margin-bottom: 15px; border: 2px solid #e2e8f0; border-radius: 12px; font-size: 1.1rem; box-sizing: border-box; }
   textarea { width: 100%; height: 150px; padding: 16px; border: 2px solid #e2e8f0; border-radius: 12px; font-size: 1rem; resize: vertical; box-sizing: border-box; font-family: monospace; }
@@ -111,7 +96,7 @@ DEBUG_PARAM: &debug=1
     position: absolute;
     bottom: 60px;
     left: 0;
-    width: 800px; /* ★幅800pxに拡大 */
+    width: 400px; /* ★元の値に戻す（UI凍結） */
     max-width: 80vw;
     background: white;
     padding: 12px;
@@ -151,6 +136,7 @@ DEBUG_PARAM: &debug=1
   .manual-grid { display: none; grid-template-columns: repeat(4, 1fr); gap: 16px; }
   @media (max-width: 1000px) { .manual-grid { grid-template-columns: repeat(2, 1fr); } }
   .mini-col { height: 500px; display: flex; flex-direction: column; background: #fff; border-radius: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+  .mini-head { padding: 10px 15px; font-weight: bold; border-bottom: 1px solid #eee; }
   .mini-body { overflow-y: auto; flex: 1; padding: 10px; }
   
   /* Utilities */
@@ -179,7 +165,7 @@ DEBUG_PARAM: &debug=1
 <div class="container" id="appContainer">
   <div class="header">
     <div style="display:flex; align-items:center; gap:10px;">
-      <div class="app-title">AI Round Table <span class="app-meta">v16.3.2-resetlog-thumb-01</span></div>
+      <div class="app-title">AI Round Table <span class="app-meta">v16.3.8-hf1-full</span></div>
     </div>
     <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
       <div class="font-ctrl-group">
@@ -189,6 +175,8 @@ DEBUG_PARAM: &debug=1
       </div>
       <button class="btn btn-secondary" onclick="openHistoryModal()">📂 ログ</button>
       <button class="btn btn-secondary" onclick="tryReset()">🔄 リセット</button>
+      <!-- ★追加：設定ボタン（例外許可：UI追加）★ -->
+      <button class="btn btn-secondary" onclick="openSettingsModal()">⚙ 設定</button>
     </div>
   </div>
 
@@ -256,6 +244,72 @@ DEBUG_PARAM: &debug=1
 
 <div id="historyModal" class="modal-overlay"><div class="modal-content"><div style="display:flex;justify-content:space-between;margin-bottom:15px;"><h2>📂 過去ログ</h2><button onclick="closeHistoryModal()" class="btn btn-secondary">✕</button></div><div id="logList" style="overflow-y:auto;flex:1;"></div></div></div>
 <div id="resetModal" class="modal-overlay"><div class="modal-content" style="max-width:400px;text-align:center;"><h3 style="margin-top:0;">🔄 リセットしますか？</h3><p style="color:#666;">画面の内容と一時保存データがクリアされます。<br>(過去ログは消えません)</p><div style="display:flex;justify-content:center;gap:10px;margin-top:20px;"><button class="btn btn-secondary" onclick="closeModal('resetModal')">キャンセル</button><button class="btn btn-danger" onclick="performReset()">実行する</button></div></div></div>
+<div id="codeModal" class="modal-overlay" style="z-index:3000;"><div class="modal-content code-modal-content"><div style="padding:15px;background:#2d2d2d;display:flex;justify-content:space-between;"><span style="font-weight:bold;color:#fff;">📜 ソースコード</span><div><button class="btn btn-primary" style="height:32px;font-size:0.8rem;" onclick="copyCode()">コピー</button> <button onclick="closeModal('codeModal')" class="btn btn-secondary" style="background:#444;color:#fff;border:none;">✕</button></div></div><div class="code-modal-body"><pre><code id="codeViewerContent"></code></pre></div></div></div>
+
+<!-- ★追加：設定モーダル（例外許可：UI追加）★ -->
+<div id="settingsModal" class="modal-overlay"><div class="modal-content" style="max-width:600px;max-height:90vh;overflow-y:auto;">
+  <div style="display:flex;justify-content:space-between;margin-bottom:20px;align-items:center;">
+    <h2 style="margin:0;">⚙ 設定</h2>
+    <button onclick="closeSettingsModal()" class="btn btn-secondary">✕</button>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:20px;">
+    <!-- 要約レベル -->
+    <div>
+      <label style="font-weight:bold;display:block;margin-bottom:8px;">📊 要約レベル</label>
+      <select id="settingSummaryLevel" style="width:100%;padding:8px;border:2px solid #e2e8f0;border-radius:8px;font-size:0.95rem;">
+        <option value="simple">簡単（結論→箇条書き3つ→次の1アクション）</option>
+        <option value="standard" selected>標準（結論→理由→手順）</option>
+        <option value="detailed">詳細（前提→判断→手順→注意点）</option>
+      </select>
+    </div>
+    <!-- 会話トーン -->
+    <div>
+      <label style="font-weight:bold;display:block;margin-bottom:8px;">💬 会話トーン</label>
+      <select id="settingConversationTone" style="width:100%;padding:8px;border:2px solid #e2e8f0;border-radius:8px;font-size:0.95rem;">
+        <option value="first">初めて（丁寧め）</option>
+        <option value="friendly" selected>フレンドリー（柔らかめ）</option>
+        <option value="business">仕事（用件中心で短く）</option>
+      </select>
+    </div>
+    <!-- 丁寧すぎ抑制 -->
+    <div>
+      <label style="font-weight:bold;display:block;margin-bottom:8px;cursor:pointer;">
+        <input type="checkbox" id="settingPoliteSuppress" style="width:18px;height:18px;margin-right:8px;cursor:pointer;">
+        丁寧すぎ抑制（前置き・挨拶を削る）
+      </label>
+    </div>
+    <!-- インジケータ表示 -->
+    <div>
+      <label style="font-weight:bold;display:block;margin-bottom:8px;">📊 インジケータ表示</label>
+      <div style="display:flex;flex-direction:column;gap:8px;padding:12px;background:#f8fafc;border-radius:8px;">
+        <label style="cursor:pointer;display:flex;align-items:center;">
+          <input type="checkbox" id="indicatorThinking" checked style="width:18px;height:18px;margin-right:8px;cursor:pointer;">
+          Thinking（思考中）
+        </label>
+        <label style="cursor:pointer;display:flex;align-items:center;">
+          <input type="checkbox" id="indicatorTimeout" checked style="width:18px;height:18px;margin-right:8px;cursor:pointer;">
+          Timeout（タイムアウト）
+        </label>
+        <label style="cursor:pointer;display:flex;align-items:center;">
+          <input type="checkbox" id="indicatorCut" checked style="width:18px;height:18px;margin-right:8px;cursor:pointer;">
+          CUT（会話が途中で切れた）
+        </label>
+        <label style="cursor:pointer;display:flex;align-items:center;">
+          <input type="checkbox" id="indicatorLate" checked style="width:18px;height:18px;margin-right:8px;cursor:pointer;">
+          Late（遅延レスポンス取得）
+        </label>
+        <label style="cursor:pointer;display:flex;align-items:center;">
+          <input type="checkbox" id="indicatorError" checked style="width:18px;height:18px;margin-right:8px;cursor:pointer;">
+          Error（エラー）
+        </label>
+      </div>
+    </div>
+  </div>
+  <div style="display:flex;justify-content:center;gap:10px;margin-top:25px;">
+    <button class="btn btn-secondary" onclick="closeSettingsModal()">キャンセル</button>
+    <button class="btn btn-primary" onclick="saveSettingsAndClose()">保存</button>
+  </div>
+</div></div>
 
 <script>
 const AGENTS = ['yui','gemini','rex','deepseek','llama','qwen','mistral','dolphin'];
@@ -264,27 +318,153 @@ let currentMode = null;
 let imagesBase64 = []; let context = ""; let sessionId = "SESS_"+Date.now();
 let codeSnippets = [];
 let assignedRoles = {};
-const STORAGE_KEY = 'ai_round_v15_1_fix';
+const STORAGE_KEY = 'ai_round_v16_3_3';
+const SETTINGS_STORAGE_KEY = 'ai_round_settings_v16_3_7';
 
-/** 画像上限（最大10枚） */
-const MAX_IMAGES = 10;
+// ★設定値（localStorageから復元）★
+let settings = {
+  summaryLevel: 'standard',
+  conversationTone: 'friendly',
+  politeSuppress: false,
+  indicators: {
+    thinking: true,
+    timeout: true,
+    cut: true,
+    late: true,
+    error: true
+  }
+};
 
-function notifyImageCap() {
-  const st = document.getElementById('statusText');
-  if (st) { st.innerText = "⚠ 画像は最大10枚まで"; st.style.color = "#b45309"; }
-  alert("画像は最大10枚までです。");
+function loadSettings() {
+  try {
+    const saved = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      settings = { ...settings, ...parsed, indicators: { ...settings.indicators, ...(parsed.indicators || {}) } };
+    }
+  } catch (e) {
+    console.warn('Settings load failed:', e);
+  }
+}
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  } catch (e) {
+    console.warn('Settings save failed:', e);
+  }
 }
 
-function canAddImage() {
-  return imagesBase64.length < MAX_IMAGES;
+/* =========================================================
+   v16.3.8-hf1-full FIX 1: detectCut（誤検知低減）
+========================================================= */
+function _detectCut_(text) {
+  if (!text || typeof text !== 'string') return false;
+
+  let clean = text
+    .replace(/<[^>]+>/g, '')
+    .replace(/[＊*`_~\[\](){}#]/g, '')
+    .trim();
+  if (!clean) return false;
+
+  const lines = clean.split(/\n/).map(s => s.trim()).filter(Boolean);
+  if (!lines.length) return false;
+
+  const last = lines[lines.length - 1];
+  if (!last || last.length < 3) return false;
+
+  if (/[。！？!?\.]$/.test(last)) return false;
+  if (/[\.．…]{2,}$/.test(last)) return true;
+
+  const short = last.length <= 28;
+
+  if (short && /(の|が|を|に|で|と|は|も|か|や|へ)$/.test(last)) return true;
+  if (short && /(て|ので|のに|けど|けれど|から|ため|つつ)$/.test(last)) return true;
+  if (short && /(よう|そう|らしい|たい|ない)$/.test(last)) return true;
+
+  return false;
 }
 
-window.onload = () => { updateClock(); setInterval(updateClock,60000); initUI(); };
+/* =========================================================
+   既存：表示名の正規化
+========================================================= */
+function normalizeDisplayName(speaker, role) {
+  const roleToModelMap = {
+    'ImageAnalyzer': 'Gemini',
+    'FactChecker': 'Gemini',
+    'CodeReviewer': 'Rex',
+    'TechAdvisor': 'Rex',
+    'Proposer': 'Gemini',
+    'Opposer': 'Gemini',
+    'Observer': 'Gemini',
+    'yui': 'Yui',
+    'gemini': 'Gemini',
+    'rex': 'Rex',
+    'deepseek': 'DeepSeek',
+    'llama': 'Llama',
+    'qwen': 'Qwen',
+    'mistral': 'Mistral',
+    'dolphin': 'Dolphin'
+  };
+  const lowerSpeaker = String(speaker || '').toLowerCase();
+  if (roleToModelMap[lowerSpeaker]) return roleToModelMap[lowerSpeaker];
+
+  const roleKey = String(role || speaker || '').replace(/[^a-zA-Z0-9]/g, '');
+  if (roleToModelMap[roleKey]) return roleToModelMap[roleKey];
+
+  return String(speaker || 'AI').charAt(0).toUpperCase() + String(speaker || 'AI').slice(1);
+}
+
+/* =========================================================
+   既存：Markdownフォーマット
+========================================================= */
+function formatMarkdown(text) {
+  if (!text) return '';
+  let formatted = text;
+
+  formatted = formatted.replace(/```(\w+)?\n([\s\S]*?)```/g, (m, l, c) => {
+    const i = codeSnippets.length; 
+    codeSnippets.push({ l: l||'text', c: c.trim() });
+    return `__CODE_${i}__`;
+  });
+
+  formatted = formatted.replace(/\n/g, '<br>');
+  formatted = formatted.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+
+  formatted = formatted.replace(/__CODE_(\d+)__/g, (m, i) => {
+    if (codeSnippets[i]) {
+      return `<button class="code-link-btn" onclick="openCode(${i})">📜 コード (${codeSnippets[i].l})</button>`;
+    }
+    return '';
+  });
+
+  return formatted;
+}
+
+/* =========================================================
+   モーダル共通
+========================================================= */
+function openModal(id) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = 'flex';
+}
+function closeModal(id) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = 'none';
+}
+
+window.onload = () => { 
+  updateClock(); 
+  setInterval(updateClock,60000); 
+  loadSettings();
+  initUI(); 
+  applySettingsToUI();
+};
 
 function initUI() {
   const con = document.getElementById('agentBadges');
   const mcSel = document.getElementById('mcSelect');
   mcSel.innerHTML = ""; con.innerHTML = "";
+  
   AGENTS.forEach(a => {
     const span = document.createElement('span');
     span.className = `agent-badge ${selected.includes(a)?'selected':''}`;
@@ -292,13 +472,23 @@ function initUI() {
     span.innerText = a.charAt(0).toUpperCase() + a.slice(1);
     span.onclick = () => toggleAgent(a);
     con.appendChild(span);
+
     const opt = document.createElement('option');
     opt.value = a; opt.innerText = a.charAt(0).toUpperCase() + a.slice(1);
     mcSel.appendChild(opt);
   });
+  
+  mcSel.addEventListener('change', function() {
+    const newMc = this.value;
+    selected = selected.filter(a => a !== newMc);
+    _updateBadgeStates_();
+  });
+  
+  _updateBadgeStates_();
 }
 
 function updateClock(){document.getElementById('clock').innerText=new Date().toLocaleString('ja-JP',{hour:'2-digit',minute:'2-digit'});}
+
 function setFontSize(s) {
   const r = document.body; document.querySelectorAll('.font-btn').forEach(b=>b.classList.remove('active'));
   if(s==='small'){r.style.fontSize='14px'; document.querySelectorAll('.font-btn')[0].classList.add('active');}
@@ -319,11 +509,27 @@ function setMode(mode) {
 }
 
 function toggleAgent(a) {
+  const currentMc = document.getElementById('mcSelect')?.value;
+  if (a === currentMc) return;
+
   if(selected.includes(a)) { if(selected.length > 1) selected = selected.filter(x => x!==a); }
   else selected.push(a);
+
+  _updateBadgeStates_();
+}
+
+function _updateBadgeStates_() {
+  const currentMc = document.getElementById('mcSelect')?.value;
   AGENTS.forEach(ag => {
     const el = document.getElementById(`badge-${ag}`);
-    if(selected.includes(ag)) el.classList.add('selected'); else el.classList.remove('selected');
+    if (!el) return;
+    if (ag === currentMc) {
+      selected = selected.filter(x => x !== ag);
+      el.classList.remove('selected');
+    } else {
+      if(selected.includes(ag)) el.classList.add('selected'); 
+      else el.classList.remove('selected');
+    }
   });
 }
 
@@ -333,11 +539,9 @@ function insertTemplate() {
   t.value = t.value + template; t.focus();
 }
 
-function resetInput() { document.getElementById('themeInput').value = ''; imagesBase64 = []; document.getElementById('previewArea').innerHTML = '';
-  const fi = document.getElementById('fileInput'); if (fi) fi.value='';
-  updatePreviewCount && updatePreviewCount(); }
-function tryReset() { document.getElementById('resetModal').style.display='flex'; }
-function closeModal(id) { document.getElementById(id).style.display='none'; }
+function resetInput() { document.getElementById('themeInput').value = ''; imagesBase64 = []; document.getElementById('previewArea').innerHTML = ''; }
+function tryReset() { openModal('resetModal'); }
+function performReset() { localStorage.removeItem(STORAGE_KEY); location.reload(); }
 
 function buildProgressBar(totalSteps) {
   const bar = document.getElementById('progressBarInner');
@@ -360,10 +564,7 @@ function startProcess() {
   if(currentMode === 'auto') startAuto(theme); else startManual(theme);
 }
 
-/**
- * ★★★ オート会議開始（画像同時配布対応）★★★
- */
-function startAuto(theme) {
+async function startAuto(theme) {
   document.getElementById('mainStage').style.display = 'block';
   document.getElementById('progressZone').style.display = 'block';
   document.getElementById('timeline').innerHTML = '';
@@ -371,275 +572,489 @@ function startAuto(theme) {
   const mc = document.getElementById('mcSelect').value;
   const rounds = parseInt(document.getElementById('roundSelect').value, 10);
   
-  let members = selected.filter(a => a !== mc);
-  if (members.length < 1) {
-    alert('⚠ エラー: 司会以外の参加者が1人以上必要です。\n参加AIを選択してください。');
-    document.getElementById('statusText').innerText = "❌ エラー: 参加者不足";
-    document.getElementById('statusText').style.color = 'red';
+  let targets = selected.length > 0 ? selected.filter(a => a !== mc) : AGENTS.filter(a => a !== mc);
+  
+  if (targets.length < 2) {
+    alert('オート会議は2人以上のAIが必要です。');
+    document.getElementById('statusText').innerText = "❌ エラー: AIが不足";
     return;
   }
   
-  const totalSteps = 2 + (members.length * rounds);
-  buildProgressBar(totalSteps);
-
-  google.script.run.withSuccessHandler(roles => {
+  try {
+    const participants = (selected.length > 0 ? selected : AGENTS).filter(a => a !== mc);
+    const roles = await new Promise((resolve, reject) => {
+      google.script.run
+        .withSuccessHandler(resolve)
+        .withFailureHandler(reject)
+        .getRoleAssignment(participants, mc);
+    });
+    
     assignedRoles = roles;
     context = `[User]: ${theme}\n`;
     const title = document.getElementById('topicTitle').value;
-    const imgs = [...imagesBase64].slice(0, MAX_IMAGES);
+    const imgs = [...imagesBase64];
     let stepCount = 1;
 
-    (async function runAutoLoop() {
-      try {
-        await runStep(mc, `ユーザー議題:「${theme}」\n司会として議論を開始し、役割（提案者・反論者）を指名して議論を始めてください。`, imgs, title, stepCount++, 'mc');
+    const mcInstr = _applySettingsToInstruction_(`ユーザー議題:「${theme}」\n司会として議論を開始し、役割（提案者・反論者）を指名して議論を始めてください。`);
+    await runStep(mc, mcInstr, imgs, title, stepCount++, 'mc');
 
-        for (let r=1; r<=rounds; r++) {
-          let prefix = (rounds > 1) ? `【ラウンド ${r}/${rounds}】` : "";
-          
-          const proposers = members.filter(a => assignedRoles[a] === 'proposer');
-          for (const agent of proposers) {
-            await runStep(agent, `${prefix}提案者として、具体的かつ論理的な解決策を提示してください。`, imgs, title, stepCount++, 'proposer');
-          }
-          
-          const others = members.filter(a => assignedRoles[a] !== 'proposer');
-          for (const agent of others) {
-            let role = assignedRoles[agent];
-            let msg = `${prefix}提案に対して意見してください。`;
-            if(role === 'opposer') msg = `${prefix}反論者として、提案のリスクや欠陥を厳しく指摘してください。`;
-            if(role === 'tech') msg = `${prefix}技術顧問として、コードや実装の実現可能性を検証してください。`;
-            await runStep(agent, msg, imgs, title, stepCount++, role);
-          }
-        }
-
-        const finalInst = `議論を総括し、提案・反論・技術検証を統合して、最終的な【完全な解決策/コード】を作成してください。`;
-        await runStep(mc, finalInst, imgs, title, stepCount, 'mc');
-        
-        document.getElementById('statusText').innerText = "✅ 完了";
-        document.getElementById('statusText').style.color = '#10b981';
-        saveStorage();
-        
-      } catch (e) {
-        console.error('Auto loop fatal error:', e);
-        document.getElementById('statusText').innerText = "⚠ 一部エラー（結果は表示済み）";
-        document.getElementById('statusText').style.color = '#f59e0b';
+    for (let r = 1; r <= rounds; r++) {
+      let prefix = (rounds > 1) ? `【ラウンド ${r}/${rounds}】` : "";
+      const proposers = targets.filter(a => assignedRoles[a] === 'proposer');
+      for (const agent of proposers) {
+        const proposerInstr = _applySettingsToInstruction_(`${prefix}提案者として、具体的かつ論理的な解決策を提示してください。`);
+        await runStep(agent, proposerInstr, imgs, title, stepCount++, 'proposer');
       }
-    })();
+      const others = targets.filter(a => assignedRoles[a] !== 'proposer');
+      for (const agent of others) {
+        let role = assignedRoles[agent];
+        let msg = `${prefix}提案に対して意見してください。`;
+        if(role === 'opposer') msg = `${prefix}反論者として、提案のリスクや欠陥を厳しく指摘してください。`;
+        if(role === 'tech') msg = `${prefix}技術顧問として、コードや実装の実現可能性を検証してください。`;
+        const agentInstr = _applySettingsToInstruction_(msg);
+        await runStep(agent, agentInstr, imgs, title, stepCount++, role);
+      }
+    }
+
+    const finalInstBase = `議論を総括し、提案・反論・技術検証を統合して、最終的な【完全な解決策/コード】を作成してください。`;
+    const finalInst = _applySettingsToInstruction_(finalInstBase);
+    await runStep(mc, finalInst, imgs, title, stepCount, 'mc');
     
-  }).getRoleAssignment(selected, mc);
+    document.getElementById('statusText').innerText = "✅ 完了";
+    saveStorage();
+  } catch (e) {
+    document.getElementById('statusText').innerText = "❌ エラー: " + (e.message || e);
+    document.getElementById('statusText').style.color = 'red';
+    console.error("startAuto error:", e);
+  }
 }
 
+/* =========================================================
+   v16.3.8-hf1-full FIX 2: CUT継続（ctx.text参照箱）＋二重追加根絶
+========================================================= */
+function _handleCutContinuation_(
+  speaker, responseText, ctx, imgs, sessionId, title, role,
+  id, indicatorId, attemptCount, resolve
+) {
+  const MAX_CUT_ATTEMPTS = 2;
+
+  const ansEl = document.getElementById(`ans-${id}`);
+  const indicatorEl = document.getElementById(indicatorId);
+
+  const setIndicator = (txt) => {
+    if (!indicatorEl) return;
+    if (!settings?.indicators?.cut) return;
+    indicatorEl.textContent = txt;
+  };
+
+  if (attemptCount >= MAX_CUT_ATTEMPTS) {
+    const cutEndMsg = `\n\n<span style="color:#f59e0b; font-weight:bold;">✂️ CUTのまま終了（次へ）</span>`;
+    if (ansEl) ansEl.innerHTML = formatMarkdown(responseText + cutEndMsg);
+    setIndicator('✂ CUT → End');
+    resolve();
+    return;
+  }
+
+  const attemptNum = attemptCount + 1;
+
+  const cutIndicator = `\n\n<span style="color:#f59e0b; font-weight:bold;">✂️ CUT検知: 会話が途中で切れています。続きを要求します... (#${attemptNum})</span>`;
+  if (ansEl) ansEl.innerHTML = formatMarkdown(responseText + cutIndicator);
+  setIndicator(`✂ CUT → Continue #${attemptNum}`);
+
+  google.script.run.withSuccessHandler((contRaw) => {
+    let contNormalized;
+    if (typeof contRaw === "string") {
+      try { contNormalized = JSON.parse(contRaw); }
+      catch (e) { contNormalized = { status: "success", response: contRaw }; }
+    } else if (typeof contRaw === "object" && contRaw !== null) {
+      contNormalized = contRaw;
+    } else {
+      contNormalized = { status: "success", response: String(contRaw || "(無応答)") };
+    }
+
+    const contText = contNormalized.response || contNormalized.text || contNormalized.message || String(contNormalized || "(無応答)");
+    const combinedText = responseText + '\n\n**（続き #' + attemptNum + '）**\n' + contText;
+
+    const isStillCut = _detectCut_(contText);
+
+    if (isStillCut && attemptCount < (MAX_CUT_ATTEMPTS - 1)) {
+      _handleCutContinuation_(speaker, combinedText, ctx, imgs, sessionId, title, role, id, indicatorId, attemptCount + 1, resolve);
+      return;
+    }
+
+    if (ansEl) ansEl.innerHTML = formatMarkdown(combinedText);
+
+    if (isStillCut) {
+      setIndicator('✂ CUT → End');
+    } else {
+      // Receivedはthinkingと独立（矛盾解消）
+      if (indicatorEl) indicatorEl.textContent = '✓ Received';
+    }
+
+    // ★続き分だけctxへ追加（最初のresponseTextはrunStepで既に追加済み）
+    ctx.text += `[${speaker}]: ${contText}\n`;
+    resolve();
+  }).withFailureHandler(() => {
+    const failMsg = `\n\n<span style="color:#f59e0b; font-weight:bold;">✂️ CUT検知: 会話が途中で切れています（続き要求失敗）</span>`;
+    if (ansEl) ansEl.innerHTML = formatMarkdown(responseText + failMsg);
+    setIndicator('✂ CUT → Failed');
+    // 失敗時はctxに追記しない（二重や矛盾を避ける）
+    resolve();
+  }).runConferenceTurn(
+    speaker,
+    ctx.text,
+    "前の回答が途中で切れています。続きを完成させてください。",
+    imgs,
+    sessionId,
+    title,
+    role
+  );
+}
+
+/* =========================================================
+   v16.3.8-hf1-full FIX 3: runStep（context参照箱→必ずglobal反映）
+========================================================= */
 function runStep(speaker, instr, imgs, title, step, role){
-  return new Promise((resolve, reject)=>{
+  return new Promise((resolve)=>{
     updateStep(step);
     const tl = document.getElementById('timeline');
     const id = Date.now();
+
     let roleBadge = ""; let roleClass = "";
     if(role === 'proposer') { roleBadge='<span class="role-badge" style="background:var(--role-proposer);">提案</span>'; roleClass='role-proposer'; }
     if(role === 'opposer') { roleBadge='<span class="role-badge" style="background:var(--role-opposer);">反論</span>'; roleClass='role-opposer'; }
     if(role === 'tech') { roleBadge='<span class="role-badge" style="background:var(--role-tech);">技術</span>'; roleClass='role-tech'; }
 
-    tl.insertAdjacentHTML('beforeend', `<div class="timeline-card ${roleClass}"><div class="tl-header h-${speaker}"><span>${speaker.toUpperCase()} ${roleBadge}</span><span>Thinking...</span></div><div class="tl-body" id="ans-${id}"><div class="loader">...</div></div></div>`);
+    const displayName = normalizeDisplayName(speaker, role);
+    const indicatorId = `indicator-${id}`;
+
+    const indicatorText = settings?.indicators?.thinking ? 'Thinking...' : '';
+    tl.insertAdjacentHTML('beforeend',
+      `<div class="timeline-card ${roleClass}">
+        <div class="tl-header h-${speaker}">
+          <span>${displayName} ${roleBadge}</span>
+          <span id="${indicatorId}">${indicatorText}</span>
+        </div>
+        <div class="tl-body" id="ans-${id}"><div class="loader">...</div></div>
+      </div>`
+    );
     window.scrollTo(0, document.body.scrollHeight);
+
+    // ★参照箱（これに追記 → 最後にglobal contextへ戻す）
+    const ctx = { text: (typeof context === 'string' ? context : String(context || "")) };
+
+    const ansEl = document.getElementById(`ans-${id}`);
+    const indicatorEl = document.getElementById(indicatorId);
+
+    const setIndicator = (txt, kind) => {
+      if (!indicatorEl) return;
+
+      if (kind === 'timeout' && !settings?.indicators?.timeout) return;
+      if (kind === 'late'    && !settings?.indicators?.late)    return;
+      if (kind === 'error'   && !settings?.indicators?.error)   return;
+      if (kind === 'cut'     && !settings?.indicators?.cut)     return;
+
+      // Receivedはthinkingと独立（矛盾解消）
+      if (kind === 'received') {
+        indicatorEl.textContent = txt;
+        return;
+      }
+
+      indicatorEl.textContent = txt;
+    };
+
+    const finalize = () => {
+      context = ctx.text;
+      resolve();
+    };
 
     const WATCHDOG_MS = 60000;
     let done = false;
+    let retryCount = 0;
+    const MAX_RETRY = 10;
+    let retryTimer = null;
+
     const timer = setTimeout(() => {
       if (done) return;
       done = true;
+
       const msg = `(⏱ タイムアウト: ${WATCHDOG_MS/1000}秒 応答なし → 次へ進みます)`;
-      const ansEl = document.getElementById(`ans-${id}`);
       if (ansEl) ansEl.innerHTML = `<span style="color:#b45309; font-weight:bold;">${msg}</span>`;
-      context += `[${speaker}]: ${msg}\n`;
-      resolve();
+      setIndicator('⏱ Timeout (move on)', 'timeout');
+
+      ctx.text += `[${speaker}]: ${msg}\n`;
+      finalize();
+
+      retryTimer = setInterval(() => {
+        if (retryCount >= MAX_RETRY) {
+          if (retryTimer) clearInterval(retryTimer);
+          return;
+        }
+        retryCount++;
+
+        google.script.run.withSuccessHandler((logs) => {
+          if (!Array.isArray(logs) || logs.length === 0) return;
+
+          const lastLog = logs[logs.length - 1];
+          if (lastLog && lastLog.speaker === speaker && lastLog.content) {
+            const already = (ansEl && ansEl.innerHTML && ansEl.innerHTML.includes(lastLog.content));
+            if (ansEl && !already) {
+              ansEl.innerHTML = `<span style="color:#10b981; font-weight:bold;">(遅延レスポンス取得)</span><br>` + formatMarkdown(lastLog.content);
+              setIndicator('↻ Late response fetched', 'late');
+
+              ctx.text += `[${speaker}]: ${lastLog.content}\n`;
+              context = ctx.text;
+
+              if (retryTimer) clearInterval(retryTimer);
+            }
+          }
+        }).getSessionLogs(sessionId);
+      }, 30000);
+
     }, WATCHDOG_MS);
 
-    google.script.run
-      .withSuccessHandler(raw => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
+    google.script.run.withSuccessHandler(raw => {
+      if (done) {
+        if (retryTimer) clearInterval(retryTimer);
+        return;
+      }
+      done = true;
+      clearTimeout(timer);
+      if (retryTimer) clearInterval(retryTimer);
 
-        let responseText = "";
-        if (typeof raw === "string") {
-          try {
-            const parsed = JSON.parse(raw);
-            responseText = parsed.response || parsed.text || parsed.message || raw;
-          } catch (e) {
-            responseText = raw;
-          }
-        } else if (typeof raw === "object" && raw !== null) {
-          responseText = raw.response || raw.text || raw.message || JSON.stringify(raw);
-        } else {
-          responseText = "(空の応答)";
-        }
+      let normalized = null;
+      if (typeof raw === "string") {
+        try { normalized = JSON.parse(raw); }
+        catch (e) { normalized = { status: "success", response: raw }; }
+      } else if (typeof raw === "object" && raw !== null) {
+        normalized = raw;
+      } else {
+        normalized = { status: "success", response: String(raw || "(無応答)") };
+      }
 
-        document.getElementById(`ans-${id}`).innerHTML = formatMarkdown(responseText);
-        context += `[${speaker}]: ${responseText}\n`;
-        resolve();
-      })
-      .withFailureHandler(e => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
+      const responseText = normalized.response || normalized.text || normalized.message || String(normalized || "(無応答)");
 
-        console.error('GAS call failed:', e);
-        const fallbackText = `**${speaker}**（${role || "observer"}）です。\n\n(※通信エラーのため自動応答)\nエラー詳細: ${e.message || e}`;
-        document.getElementById(`ans-${id}`).innerHTML = formatMarkdown(fallbackText);
-        context += `[${speaker}]: ${fallbackText}\n`;
-        resolve();
-      })
-      .runConferenceTurn(speaker, context, instr, (imgs || []).slice(0, MAX_IMAGES), sessionId, title, role);
+      // Receivedはthinkingと独立
+      setIndicator('✓ Received', 'received');
+
+      // ★最初の応答はここで1回だけctxに追加（ここが二重追加防止の核）
+      ctx.text += `[${speaker}]: ${responseText}\n`;
+
+      const isCut = _detectCut_(responseText);
+      const autoContinueEnabled = true;
+
+      if (ansEl) ansEl.innerHTML = formatMarkdown(responseText);
+
+      if (isCut && autoContinueEnabled) {
+        _handleCutContinuation_(speaker, responseText, ctx, imgs, sessionId, title, role, id, indicatorId, 0, () => {
+          finalize();
+        });
+        return;
+      }
+
+      finalize();
+    }).withFailureHandler(err => {
+      if (done) {
+        if (retryTimer) clearInterval(retryTimer);
+        return;
+      }
+      done = true;
+      clearTimeout(timer);
+      if (retryTimer) clearInterval(retryTimer);
+
+      const errorText = `(システムエラー)\n${err?.message || err}`;
+      if (ansEl) ansEl.innerHTML = `<span style="color:red;">${formatMarkdown(errorText)}</span>`;
+      setIndicator('⚠ Error', 'error');
+
+      ctx.text += `[${speaker}]: ${errorText}\n`;
+      finalize();
+    }).runConferenceTurn(speaker, ctx.text, instr, imgs, sessionId, title, role);
   });
 }
 
 function startManual(theme) {
   const grid = document.getElementById('manualGrid');
   grid.style.display = 'grid'; grid.innerHTML = "";
-  const cols = Math.min(selected.length, 4);
+  
+  const mc = document.getElementById('mcSelect').value;
+  const targets = (selected.length > 0 ? selected : AGENTS).filter(a => a !== mc);
+  
+  const cols = Math.min(targets.length, 4);
   grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-  selected.forEach(a => {
+  targets.forEach(a => {
     const div = document.createElement('div'); div.className = 'mini-col';
     const id = `hist-${a}-${Date.now()}`;
-    div.innerHTML = `<div class="mini-head h-${a}">${a.toUpperCase()}</div><div class="mini-body" id="${id}"><div style="color:#999;">Thinking...</div></div>`;
+    const displayName = normalizeDisplayName(a, null);
+    div.innerHTML = `<div class="mini-head h-${a}">${displayName}</div><div class="mini-body" id="${id}"><div style="color:#999;">Thinking...</div></div>`;
     grid.appendChild(div);
-    google.script.run.withSuccessHandler(r => {
-      if (typeof r === "string") { try { r = JSON.parse(r); } catch(e) { r = { response: r }; } }
-      if (!r || typeof r !== "object") r = { response: String(r ?? "") };
-
-      document.getElementById(id).innerHTML = formatMarkdown(r.response); saveStorage();
-    }).runConferenceTurn(a, theme, theme, imagesBase64.slice(0, MAX_IMAGES), sessionId, "", null);
+    google.script.run.withSuccessHandler(raw => {
+      let normalized = null;
+      if (typeof raw === "string") {
+        try { normalized = JSON.parse(raw); } catch (e) { normalized = { status: "success", response: raw }; }
+      } else if (typeof raw === "object" && raw !== null) {
+        normalized = raw;
+      } else {
+        normalized = { status: "success", response: String(raw || "(無応答)") };
+      }
+      const responseText = normalized.response || normalized.text || normalized.message || String(normalized || "(無応答)");
+      document.getElementById(id).innerHTML = formatMarkdown(responseText);
+      saveStorage();
+    }).runConferenceTurn(a, theme, theme, imagesBase64, sessionId, "", null);
   });
   document.getElementById('statusText').innerText = "✅ 完了";
 }
 
-
-/* ===== 追加：不足していた関数群（v16.3.2） ===== */
-
-function escapeHtml(str) {
-  return String(str ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+function openCode(i) {
+  const s = codeSnippets[i]; const el = document.getElementById('codeViewerContent');
+  el.textContent = s.c; el.className = `language-${s.l}`; 
+  if (typeof hljs !== 'undefined' && hljs) hljs.highlightElement(el);
+  openModal('codeModal');
+}
+function copyCode() { 
+  const el = document.getElementById('codeViewerContent');
+  if (el) navigator.clipboard.writeText(el.textContent).then(()=>alert("コピーしました")); 
+}
+function uploadCode(){
+  const c = document.getElementById('themeInput').value;
+  if(c) google.script.run.withSuccessHandler(alert).uploadToGithub(prompt("File?","Code.gs"),c);
 }
 
-function formatMarkdown(mdText) {
+// Image Handling
+async function handleFileSelect(e){
+  const f = Array.from(e.target.files);
+  for(const x of f){
+    const c = await compress(x);
+    if (c) {
+      imagesBase64.push(c);
+      const wrapper = document.createElement('div');
+      wrapper.className = 'preview-wrapper';
+      wrapper.innerHTML = `<img src="${c}" class="preview-thumb"><div class="preview-popup"><img src="${c}"></div>`;
+      document.getElementById('previewArea').appendChild(wrapper);
+    }
+  }
+}
+function compress(b){
+  return new Promise(r=>{
+    const f = new FileReader();
+    f.onload = e => {
+      const i = new Image();
+      i.onload = () => {
+        const c = document.createElement('canvas');
+        let w = i.width, h = i.height;
+        if(w > 1000 || h > 1000) {
+          const s = Math.min(1000/w, 1000/h);
+          w *= s; h *= s;
+        }
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(i, 0, 0, w, h);
+        r(c.toDataURL('image/jpeg', 0.7));
+      };
+      i.src = e.target.result;
+    };
+    f.readAsDataURL(b);
+  });
+}
+async function pasteFromClipboard(){
   try {
-    const html = marked.parse(mdText || "", {
-      breaks: true,
-      highlight: function(code, lang) {
-        try {
-          if (lang && hljs.getLanguage(lang)) {
-            return hljs.highlight(code, { language: lang }).value;
-          }
-          return hljs.highlightAuto(code).value;
-        } catch (e) {
-          return escapeHtml(code);
+    const i = await navigator.clipboard.read();
+    for(const x of i){
+      const t = x.types.find(a => a.startsWith('image/'));
+      if(t){
+        const b = await x.getType(t);
+        const c = await compress(b);
+        if (c) {
+          imagesBase64.push(c);
+          const w = document.createElement('div');
+          w.className = 'preview-wrapper';
+          w.innerHTML = `<img src="${c}" class="preview-thumb"><div class="preview-popup"><img src="${c}"></div>`;
+          document.getElementById('previewArea').appendChild(w);
         }
       }
-    });
-    return html;
+    }
   } catch (e) {
-    return "<pre style='white-space:pre-wrap;'>" + escapeHtml(mdText || "") + "</pre>";
+    console.warn('Clipboard read failed:', e);
   }
 }
 
-/* ---- コード表示（index.htmlのみ） ---- */
-function openCode() {
+function saveStorage(){
   try {
-    openModal('codeModal');
-    const ta = document.getElementById('codeViewerContent');
-    if (ta) ta.value = document.documentElement.outerHTML || "";
+    localStorage.setItem(STORAGE_KEY, document.getElementById('mainStage').innerHTML);
   } catch (e) {
-    alert("コード表示でエラー: " + (e?.message || e));
+    console.warn('saveStorage failed:', e);
   }
 }
 
-function copyCode() {
-  try {
-    const ta = document.getElementById('codeViewerContent');
-    if (!ta) return alert("コピー対象が見つかりません");
-    ta.select();
-    document.execCommand("copy");
-    alert("コピーしました");
-  } catch (e) {
-    alert("コピーでエラー: " + (e?.message || e));
-  }
-}
-
-function uploadCode() {
-  // 現状 Code.gs 側がダミー実装のため、動作確認用にメッセージだけ返す
-  try {
-    document.getElementById('statusText').innerText = "GitHub送信中…";
-    document.getElementById('statusText').style.color = "#fbbf24";
-    google.script.run
-      .withSuccessHandler((res) => {
-        document.getElementById('statusText').innerText = "GitHub送信: " + (res || "OK");
-        document.getElementById('statusText').style.color = "#10b981";
-      })
-      .withFailureHandler((err) => {
-        document.getElementById('statusText').innerText = "GitHub送信失敗: " + (err?.message || err);
-        document.getElementById('statusText').style.color = "#ef4444";
-      })
-      .uploadToGithub();
-  } catch (e) {
-    alert("GitHub送信でエラー: " + (e?.message || e));
-  }
-}
-
-/* ---- 履歴（過去ログ） ---- */
-function openHistoryModal() {
+function openHistoryModal(){
   openModal('historyModal');
-  const listEl = document.getElementById('logList');
-  if (listEl) listEl.innerHTML = "読込中…";
+  google.script.run.withSuccessHandler(l=>{
+    let list = l;
+    if (typeof l === "string") {
+      try { list = JSON.parse(l); } catch (e) { list = []; }
+    }
+    if (!Array.isArray(list)) list = [];
+    
+    if (!list.length) {
+      document.getElementById('logList').innerHTML = "<div style='padding:20px;text-align:center;color:#64748b;'>保存済みログがありません。</div>";
+      return;
+    }
+    
+    document.getElementById('logList').innerHTML = list.map(x=>`<div class="log-item"><div class="log-text" onclick="loadLog('${x.id}')">${x.time || ''} ${x.title||'(無題)'}</div><button class="log-del-btn" onclick="deleteLog('${x.id}',this)">削除</button></div>`).join('');
+  }).withFailureHandler(err=>{
+    document.getElementById('logList').innerHTML = `<div style='padding:20px;text-align:center;color:#ef4444;'>履歴の読み込みに失敗: ${err?.message || err}</div>`;
+  }).getLogList();
+}
+function closeHistoryModal(){ closeModal('historyModal'); }
 
-  google.script.run
-    .withSuccessHandler((l) => {
-      let list = l;
-      if (typeof l === "string") {
-        try { list = JSON.parse(l); } catch (e) { list = []; }
-      }
-      if (!Array.isArray(list)) list = [];
+// 設定モーダル
+function openSettingsModal() { applySettingsToUI(); openModal('settingsModal'); }
+function closeSettingsModal() { closeModal('settingsModal'); }
 
-      if (!list.length) {
-        listEl.innerHTML = "<div class='small-note'>保存済みログがありません。</div>";
-        return;
-      }
-
-      listEl.innerHTML = list.map(it => {
-        const title = escapeHtml(it.title || "(無題)");
-        const time  = escapeHtml(it.time  || "");
-        const id    = escapeHtml(it.id    || "");
-        return `
-          <div class="log-item">
-            <div style="flex:1;">
-              <div><b>${title}</b></div>
-              <div class="small-note">${time}</div>
-              <div class="small-note">${id}</div>
-            </div>
-            <div style="display:flex;gap:8px;">
-              <button class="btn btn-secondary" onclick="loadLog('${id}')">開く</button>
-              <button class="btn btn-secondary" onclick="deleteLog('${id}')">削除</button>
-            </div>
-          </div>
-        `;
-      }).join("");
-    })
-    .withFailureHandler((err) => {
-      listEl.innerHTML = "<div class='small-note' style='color:#ef4444;'>履歴の読込に失敗: " + escapeHtml(err?.message || err) + "</div>";
-    })
-    .getLogList();
+function applySettingsToUI() {
+  document.getElementById('settingSummaryLevel').value = settings.summaryLevel;
+  document.getElementById('settingConversationTone').value = settings.conversationTone;
+  document.getElementById('settingPoliteSuppress').checked = settings.politeSuppress;
+  document.getElementById('indicatorThinking').checked = settings.indicators.thinking;
+  document.getElementById('indicatorTimeout').checked = settings.indicators.timeout;
+  document.getElementById('indicatorCut').checked = settings.indicators.cut;
+  document.getElementById('indicatorLate').checked = settings.indicators.late;
+  document.getElementById('indicatorError').checked = settings.indicators.error;
 }
 
-function closeHistoryModal() {
-  closeModal('historyModal');
+function saveSettingsAndClose() {
+  settings.summaryLevel = document.getElementById('settingSummaryLevel').value;
+  settings.conversationTone = document.getElementById('settingConversationTone').value;
+  settings.politeSuppress = document.getElementById('settingPoliteSuppress').checked;
+  settings.indicators.thinking = document.getElementById('indicatorThinking').checked;
+  settings.indicators.timeout = document.getElementById('indicatorTimeout').checked;
+  settings.indicators.cut = document.getElementById('indicatorCut').checked;
+  settings.indicators.late = document.getElementById('indicatorLate').checked;
+  settings.indicators.error = document.getElementById('indicatorError').checked;
+  saveSettings();
+  closeSettingsModal();
 }
 
-function loadLog(sessionId) {
-  if (!sessionId) return;
-  if (!confirm("Load?")) return;
+function _applySettingsToInstruction_(baseInstr) {
+  let tags = [];
+  if (settings.summaryLevel === 'simple') tags.push('[要約:簡単] 結論→箇条書き3つ→次の1アクション');
+  else if (settings.summaryLevel === 'standard') tags.push('[要約:標準] 結論→理由→手順');
+  else if (settings.summaryLevel === 'detailed') tags.push('[要約:詳細] 前提→判断→手順→注意点');
 
+  if (settings.conversationTone === 'first') tags.push('[トーン:初めて] 丁寧め');
+  else if (settings.conversationTone === 'friendly') tags.push('[トーン:フレンドリー] 柔らかめ（砕けすぎ禁止）');
+  else if (settings.conversationTone === 'business') tags.push('[トーン:仕事] 用件中心で短く');
+
+  if (settings.politeSuppress) tags.push('[丁寧抑制ON] 前置き・挨拶を削る');
+
+  if (tags.length > 0) return baseInstr + '\n\n【運用タグ】\n' + tags.join('\n');
+  return baseInstr;
+}
+
+function loadLog(sessionId){
+  if(!sessionId) return;
+  if(!confirm("過去ログを読み込みますか？")) return;
+  
+  closeHistoryModal();
+  
   google.script.run
     .withSuccessHandler((logs) => {
       let arr = logs;
@@ -647,246 +1062,76 @@ function loadLog(sessionId) {
         try { arr = JSON.parse(logs); } catch (e) { arr = []; }
       }
       if (!Array.isArray(arr)) arr = [];
-
-      // 表示領域：timeline に “会話ログ” を並べる
+      
+      if (arr.length === 0) {
+        alert("ログがありません");
+        return;
+      }
+      
       const tl = document.getElementById('timeline');
+      if (!tl) {
+        alert("タイムライン要素が見つかりません");
+        return;
+      }
+      
       tl.innerHTML = "";
-      arr.forEach((it) => {
-        const card = document.createElement("div");
-        card.className = "agent-card";
-        const role = escapeHtml(it.role || "");
-        const time = escapeHtml(it.time || "");
-        const model = escapeHtml(it.model || "");
+      
+      arr.forEach((log) => {
+        const speaker = String(log.speaker || "unknown");
+        const content = String(log.content || "");
+        const time = String(log.time || "");
+        
+        const displayName = normalizeDisplayName(speaker, null);
+        
+        let roleBadge = "";
+        let roleClass = "";
+        const lowerSpeaker = speaker.toLowerCase();
+        if (lowerSpeaker.includes('proposer') || assignedRoles[speaker] === 'proposer') {
+          roleBadge = '<span class="role-badge" style="background:var(--role-proposer);">提案</span>';
+          roleClass = 'role-proposer';
+        } else if (lowerSpeaker.includes('opposer') || assignedRoles[speaker] === 'opposer') {
+          roleBadge = '<span class="role-badge" style="background:var(--role-opposer);">反論</span>';
+          roleClass = 'role-opposer';
+        } else if (lowerSpeaker.includes('tech') || assignedRoles[speaker] === 'tech') {
+          roleBadge = '<span class="role-badge" style="background:var(--role-tech);">技術</span>';
+          roleClass = 'role-tech';
+        } else if (lowerSpeaker === 'yui' || lowerSpeaker.includes('mc')) {
+          roleBadge = '<span class="role-badge" style="background:#64748b;">司会</span>';
+        }
+        
+        const card = document.createElement('div');
+        card.className = `timeline-card ${roleClass}`;
         card.innerHTML = `
-          <div class="agent-title">${role}</div>
-          <div class="agent-response">${formatMarkdown(it.text || "")}</div>
-          <div class="agent-meta">${time}${model ? "｜" + model : ""}</div>
+          <div class="tl-header h-${speaker.toLowerCase()}">
+            <span>${displayName} ${roleBadge}</span>
+            <span>${time}</span>
+          </div>
+          <div class="tl-body">${formatMarkdown(content)}</div>
         `;
         tl.appendChild(card);
       });
-
-      document.getElementById('mainStage').style.display = "block";
-      document.getElementById('progressZone').style.display = "none";
-      closeHistoryModal();
-
-      document.getElementById('statusText').innerText = "履歴を表示しました";
-      document.getElementById('statusText').style.color = "#10b981";
+      
+      document.getElementById('mainStage').style.display = 'block';
+      document.getElementById('progressZone').style.display = 'none';
+      
+      window.scrollTo(0, document.body.scrollHeight);
+      
+      document.getElementById('statusText').innerText = "過去ログを表示しました";
+      document.getElementById('statusText').style.color = '#10b981';
     })
     .withFailureHandler((err) => {
-      alert("ログの読込に失敗: " + (err?.message || err));
+      alert("ログの読み込みに失敗: " + (err?.message || err));
     })
     .getSessionLogs(sessionId);
 }
 
-function deleteLog(sessionId) {
-  if (!sessionId) return;
-  if (!confirm("Del?")) return;
-
-  google.script.run
-    .withSuccessHandler(() => {
-      openHistoryModal(); // refresh
-    })
-    .withFailureHandler((err) => {
-      alert("削除に失敗: " + (err?.message || err));
-    })
-    .deleteLog(sessionId);
+function deleteLog(id, btn){
+  if(!id) return;
+  if(!confirm("削除しますか？")) return;
+  google.script.run.withSuccessHandler(r=>{
+    if(r.success && btn) btn.parentElement.remove();
+  }).deleteLog(id);
 }
-
-/* ---- 画像サムネ（最大10枚 / HEIC対応） ---- */
-function updatePreviewCount() {
-  const note = document.getElementById("imageNote");
-  if (!note) return;
-  note.innerText = `📎 最大 ${MAX_IMAGES} 枚まで。現在: ${imagesBase64.length} 枚`;
-}
-
-function removePreviewImage(idx) {
-  try {
-    imagesBase64.splice(idx, 1);
-    const area = document.getElementById("previewArea");
-    if (area && area.children[idx]) area.removeChild(area.children[idx]);
-    // 再インデックス
-    Array.from(area.children).forEach((w, i) => {
-      const btn = w.querySelector("button");
-      if (btn) btn.setAttribute("onclick", `removePreviewImage(${i})`);
-    });
-    updatePreviewCount();
-  } catch (e) {}
-}
-
-async function handleFileSelect(event) {
-  try {
-    const files = Array.from(event.target.files || []);
-    if (!files.length) return;
-
-    const canAdd = Math.max(0, MAX_IMAGES - imagesBase64.length);
-    const picked = files.slice(0, canAdd);
-
-    for (const f of picked) {
-      const dataUrl = await compress(f);
-      if (!dataUrl) continue;
-      addPreview(dataUrl);
-    }
-
-    if (files.length > picked.length) {
-      alert(`画像は最大 ${MAX_IMAGES} 枚までです。超過分は無視しました。`);
-    }
-  } catch (e) {
-    alert("画像の読込でエラー: " + (e?.message || e));
-  } finally {
-    // 同じファイルを再選択できるように
-    const fi = document.getElementById("fileInput");
-    if (fi) fi.value = "";
-  }
-}
-
-function addPreview(dataUrl) {
-  imagesBase64.push(dataUrl);
-
-  const wrap = document.createElement("div");
-  wrap.className = "preview-wrap";
-  wrap.innerHTML = `
-    <img src="${dataUrl}" alt="preview" />
-    <button onclick="removePreviewImage(${imagesBase64.length - 1})">✕</button>
-  `;
-  document.getElementById("previewArea").appendChild(wrap);
-  updatePreviewCount();
-}
-
-async function pasteFromClipboard() {
-  try {
-    if (!navigator.clipboard || !navigator.clipboard.read) {
-      alert("このブラウザは貼り付け（画像）に未対応です。");
-      return;
-    }
-    const items = await navigator.clipboard.read();
-    if (!items || !items.length) return;
-
-    for (const item of items) {
-      for (const type of item.types) {
-        if (!type.startsWith("image/")) continue;
-
-        if (imagesBase64.length >= MAX_IMAGES) {
-          alert(`画像は最大 ${MAX_IMAGES} 枚までです。`);
-          return;
-        }
-
-        const blob = await item.getType(type);
-        const dataUrl = await compress(blob);
-        if (dataUrl) addPreview(dataUrl);
-      }
-    }
-  } catch (e) {
-    alert("貼り付けでエラー: " + (e?.message || e));
-  }
-}
-
-async function compress(fileOrBlob) {
-  // 1) HEIC/HEIF を JPEG に変換（可能なら）
-  let blob = fileOrBlob;
-  const name = fileOrBlob?.name || "clipboard";
-  const isHeic = /heic|heif/i.test(blob?.type || "") || /\.heic$/i.test(name) || /\.heif$/i.test(name);
-
-  if (isHeic && typeof heic2any !== "undefined") {
-    try {
-      const converted = await heic2any({ blob: blob, toType: "image/jpeg", quality: 0.85 });
-      blob = Array.isArray(converted) ? converted[0] : converted;
-    } catch (e) {
-      // 変換に失敗したら、そのまま進む（結果は空になる可能性あり）
-    }
-  }
-
-  // 2) dataURL化
-  const dataUrl = await new Promise((resolve) => {
-    const r = new FileReader();
-    r.onload = () => resolve(r.result);
-    r.onerror = () => resolve(null);
-    r.readAsDataURL(blob);
-  });
-  if (!dataUrl) return null;
-
-  // 3) Canvasで縮小（最大 1024px）
-  const img = new Image();
-  const loaded = await new Promise((resolve) => {
-    img.onload = () => resolve(true);
-    img.onerror = () => resolve(false);
-    img.src = dataUrl;
-  });
-  if (!loaded) {
-    // 画像として読めなかった場合は、元データを返す（サムネ表示できない可能性は残る）
-    return dataUrl;
-  }
-
-  const max = 1024;
-  let w = img.width, h = img.height;
-  if (w > max || h > max) {
-    const r = Math.min(max / w, max / h);
-    w = Math.round(w * r);
-    h = Math.round(h * r);
-  }
-
-  const c = document.createElement("canvas");
-  c.width = w;
-  c.height = h;
-  const ctx = c.getContext("2d", { alpha: false });
-  ctx.drawImage(img, 0, 0, w, h);
-
-  // JPEGで軽量化（品質0.82）
-  try {
-    return c.toDataURL("image/jpeg", 0.82);
-  } catch (e) {
-    return dataUrl;
-  }
-}
-
-/* ---- リセット（白画面対策：reloadしない） ---- */
-function performReset() {
-  try {
-    // 画面要素のクリーンアップ
-    resetInput();
-    document.getElementById("timeline").innerHTML = "";
-    document.getElementById("manualGrid").innerHTML = "";
-    document.getElementById("mainStage").style.display = "none";
-    document.getElementById("progressZone").style.display = "none";
-    document.getElementById("settingsArea").style.display = "none";
-    closeModal("resetModal");
-
-    // 既定へ
-    currentMode = null;
-    selected = ['yui', 'gemini', 'rex', 'deepseek'];
-    initUI();
-
-    document.getElementById("statusText").innerText = "リセットしました";
-    document.getElementById("statusText").style.color = "#10b981";
-  } catch (e) {
-    alert("リセットでエラー: " + (e?.message || e));
-    // 最終手段
-    location.reload();
-  }
-}
-
-/* ---- 例外で真っ白になりにくくする ---- */
-window.addEventListener("error", (ev) => {
-  try {
-    const st = document.getElementById("statusText");
-    if (st) {
-      st.innerText = "エラー: " + (ev?.message || "unknown");
-      st.style.color = "#ef4444";
-    }
-  } catch (e) {}
-});
-
-window.addEventListener("unhandledrejection", (ev) => {
-  try {
-    const st = document.getElementById("statusText");
-    if (st) {
-      st.innerText = "エラー: " + (ev?.reason?.message || ev?.reason || "unknown");
-      st.style.color = "#ef4444";
-    }
-  } catch (e) {}
-});
-
-updatePreviewCount();
-
 </script>
 </body>
 </html>
